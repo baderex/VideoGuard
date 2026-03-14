@@ -14,7 +14,7 @@ export class AnalyticsService {
   pollLiveAnalytics(intervalMs = 5000): Observable<LiveAnalytics> {
     return timer(0, intervalMs).pipe(
       switchMap(() => this.getLiveAnalytics()),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
   }
 
@@ -34,7 +34,7 @@ export class AnalyticsService {
   }, intervalMs = 60000): Observable<AnalyticsDataPoint[]> {
     return timer(0, intervalMs).pipe(
       switchMap(() => this.getAnalyticsHistory(params)),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
   }
 

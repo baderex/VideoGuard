@@ -14,7 +14,7 @@ export class CameraService {
   pollCameras(intervalMs = 10000): Observable<Camera[]> {
     return timer(0, intervalMs).pipe(
       switchMap(() => this.listCameras()),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
   }
 
@@ -37,7 +37,7 @@ export class CameraService {
   pollCameraSnapshot(id: number, intervalMs = 2000): Observable<DetectionSnapshot> {
     return timer(0, intervalMs).pipe(
       switchMap(() => this.getCameraSnapshot(id)),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
   }
 }
