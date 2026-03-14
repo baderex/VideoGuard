@@ -1,0 +1,127 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Rajdhani:wght@500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: 'Inter', sans-serif;
+  --font-display: 'Rajdhani', sans-serif;
+
+  --color-background: hsl(224, 71%, 4%);
+  --color-foreground: hsl(210, 40%, 98%);
+  
+  --color-card: hsl(224, 71%, 8%);
+  --color-card-foreground: hsl(210, 40%, 98%);
+  --color-card-border: hsl(224, 71%, 15%);
+  
+  --color-popover: hsl(224, 71%, 8%);
+  --color-popover-foreground: hsl(210, 40%, 98%);
+  --color-popover-border: hsl(224, 71%, 15%);
+
+  --color-primary: hsl(190, 90%, 50%);
+  --color-primary-foreground: hsl(224, 71%, 4%);
+  
+  --color-secondary: hsl(224, 71%, 15%);
+  --color-secondary-foreground: hsl(210, 40%, 98%);
+  
+  --color-muted: hsl(224, 71%, 12%);
+  --color-muted-foreground: hsl(215, 20%, 65%);
+  
+  --color-accent: hsl(270, 90%, 60%);
+  --color-accent-foreground: hsl(210, 40%, 98%);
+
+  --color-success: hsl(142, 71%, 45%);
+  --color-success-foreground: hsl(224, 71%, 4%);
+  
+  --color-warning: hsl(38, 92%, 50%);
+  --color-warning-foreground: hsl(224, 71%, 4%);
+  
+  --color-destructive: hsl(348, 83%, 47%);
+  --color-destructive-foreground: hsl(210, 40%, 98%);
+
+  --color-border: hsl(224, 71%, 15%);
+  --color-input: hsl(224, 71%, 15%);
+  --color-ring: hsl(190, 90%, 50%);
+
+  --color-chart-1: hsl(190, 90%, 50%);
+  --color-chart-2: hsl(142, 71%, 45%);
+  --color-chart-3: hsl(38, 92%, 50%);
+  --color-chart-4: hsl(348, 83%, 47%);
+  --color-chart-5: hsl(270, 90%, 60%);
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+:root {
+  --background: 224 71% 4%;
+  --foreground: 210 40% 98%;
+  --card: 224 71% 8%;
+  --card-foreground: 210 40% 98%;
+  --popover: 224 71% 8%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 190 90% 50%;
+  --primary-foreground: 224 71% 4%;
+  --secondary: 224 71% 15%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 224 71% 12%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 270 90% 60%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 348 83% 47%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 224 71% 15%;
+  --input: 224 71% 15%;
+  --ring: 190 90% 50%;
+  --radius: 0.5rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased font-sans selection:bg-primary/30 selection:text-primary m-0 p-0;
+    background-image: 
+      radial-gradient(circle at 50% 0%, hsl(190 90% 50% / 0.05) 0%, transparent 50%),
+      radial-gradient(circle at 100% 100%, hsl(270 90% 60% / 0.05) 0%, transparent 50%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display tracking-wide uppercase;
+  }
+}
+
+@keyframes scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; box-shadow: 0 0 15px currentColor; }
+  50% { opacity: 0.5; box-shadow: 0 0 5px currentColor; }
+}
+
+.animate-scan {
+  animation: scan 4s linear infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
