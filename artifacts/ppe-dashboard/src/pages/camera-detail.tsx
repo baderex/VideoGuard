@@ -63,7 +63,7 @@ export default function CameraDetail() {
           <div className="lg:col-span-2 space-y-6">
             <Card className="overflow-hidden border-primary/20 shadow-[0_0_30px_rgba(0,255,255,0.05)]">
               <div className="p-1 bg-black">
-                <SimulatedFeed snapshot={snapshot} status={camera.status} />
+                <SimulatedFeed snapshot={snapshot} status={camera.status} cameraId={camera.id} />
               </div>
             </Card>
 
