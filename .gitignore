@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# YOLO model weights (auto-downloaded on first run, ~24MB)
+artifacts/yolo-service/.cache/
+
+# Python libs
+.pythonlibs/
+__pycache__/
+*.pyc
