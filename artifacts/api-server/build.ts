@@ -60,8 +60,14 @@ async function buildAll() {
     bundle: true,
     format: "cjs",
     outfile: path.resolve(distDir, "index.cjs"),
+    // Polyfill import.meta.url so fileURLToPath works in the CJS bundle.
+    // The banner runs before any module code; define replaces the expression.
+    banner: {
+      js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
+    },
     define: {
       "process.env.NODE_ENV": '"production"',
+      "import.meta.url": "__importMetaUrl",
     },
     minify: true,
     external: externals,
