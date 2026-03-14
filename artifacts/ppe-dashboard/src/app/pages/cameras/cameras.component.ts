@@ -116,7 +116,7 @@ export class CamerasComponent implements OnInit, OnDestroy {
 
   toggleStatus(camera: Camera) {
     const newStatus = camera.status === 'active' ? 'inactive' : 'active';
-    this.cameraService.updateCamera(camera.id, { status: newStatus as any }).subscribe(() => {
+    this.cameraService.updateCamera(camera.id, { status: newStatus }).subscribe(() => {
       this.loadCameras();
     });
   }

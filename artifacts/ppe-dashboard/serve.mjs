@@ -1,11 +1,13 @@
 import { spawn } from 'child_process';
 
 const port = process.env.PORT || '4200';
+const basePath = process.env.BASE_PATH || '/';
 
 const args = [
   'serve',
   '--host', '0.0.0.0',
   '--port', port,
+  '--serve-path', basePath,
   '--configuration', 'development'
 ];
 
