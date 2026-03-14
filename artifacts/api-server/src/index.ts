@@ -67,6 +67,27 @@ if (!existsSync(yoloScript)) {
   if (!python) {
     console.warn("[YOLO] Python 3 not found — skipping YOLO service.");
   } else {
+    // Install Python dependencies before spawning so the service starts cleanly
+    // in any environment (dev, production, fresh clone, CI, etc.)
+    const requirementsFile = path.join(
+      workspaceRoot,
+      "artifacts/yolo-service/requirements.txt",
+    );
+    if (existsSync(requirementsFile)) {
+      try {
+        console.log("[YOLO] Ensuring Python dependencies are installed...");
+        execSync(`"${python}" -m pip install -q -r "${requirementsFile}"`, {
+          stdio: "inherit",
+        });
+        console.log("[YOLO] Python dependencies ready.");
+      } catch (e) {
+        console.warn(
+          "[YOLO] pip install failed — service may not start correctly:",
+          (e as Error).message,
+        );
+      }
+    }
+
     console.log(
       `[YOLO] Spawning detection service (python=${python}) on port ${yoloPort}...`,
     );
