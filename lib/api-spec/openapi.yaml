@@ -1,15 +1,22 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Video Analytics PPE Compliance API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: cameras
+    description: Camera management
+  - name: analytics
+    description: Analytics and detection data
+  - name: alerts
+    description: PPE compliance alerts
+  - name: reports
+    description: Reporting endpoints
 paths:
   /healthz:
     get:
@@ -24,6 +31,274 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /cameras:
+    get:
+      operationId: listCameras
+      tags: [cameras]
+      summary: List all cameras
+      responses:
+        "200":
+          description: List of cameras
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Camera"
+    post:
+      operationId: createCamera
+      tags: [cameras]
+      summary: Add a new camera
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCameraRequest"
+      responses:
+        "201":
+          description: Camera created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+
+  /cameras/{cameraId}:
+    get:
+      operationId: getCamera
+      tags: [cameras]
+      summary: Get camera by ID
+      parameters:
+        - name: cameraId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Camera details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateCamera
+      tags: [cameras]
+      summary: Update camera status
+      parameters:
+        - name: cameraId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCameraRequest"
+      responses:
+        "200":
+          description: Updated camera
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+    delete:
+      operationId: deleteCamera
+      tags: [cameras]
+      summary: Delete a camera
+      parameters:
+        - name: cameraId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /cameras/{cameraId}/snapshot:
+    get:
+      operationId: getCameraSnapshot
+      tags: [cameras]
+      summary: Get latest detection snapshot for a camera
+      parameters:
+        - name: cameraId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Latest snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetectionSnapshot"
+
+  /analytics/live:
+    get:
+      operationId: getLiveAnalytics
+      tags: [analytics]
+      summary: Get live analytics summary across all cameras
+      responses:
+        "200":
+          description: Live analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveAnalytics"
+
+  /analytics/history:
+    get:
+      operationId: getAnalyticsHistory
+      tags: [analytics]
+      summary: Get historical analytics data
+      parameters:
+        - name: cameraId
+          in: query
+          schema:
+            type: integer
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: interval
+          in: query
+          schema:
+            type: string
+            enum: [minute, hour, day]
+            default: hour
+      responses:
+        "200":
+          description: Historical analytics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AnalyticsDataPoint"
+
+  /analytics/compliance-summary:
+    get:
+      operationId: getComplianceSummary
+      tags: [analytics]
+      summary: Get PPE compliance summary
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month]
+            default: today
+      responses:
+        "200":
+          description: Compliance summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComplianceSummary"
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      tags: [alerts]
+      summary: List PPE compliance alerts
+      parameters:
+        - name: cameraId
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, acknowledged, resolved]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Alert list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertListResponse"
+
+  /alerts/{alertId}/acknowledge:
+    post:
+      operationId: acknowledgeAlert
+      tags: [alerts]
+      summary: Acknowledge an alert
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Alert acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Alert"
+
+  /alerts/{alertId}/resolve:
+    post:
+      operationId: resolveAlert
+      tags: [alerts]
+      summary: Resolve an alert
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Alert resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Alert"
+
+  /reports/daily:
+    get:
+      operationId: getDailyReport
+      tags: [reports]
+      summary: Get daily compliance report
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Daily report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyReport"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +309,373 @@ components:
       required:
         - status
 
+    Camera:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        location:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, error]
+        streamUrl:
+          type: string
+        ppeRequirements:
+          type: array
+          items:
+            type: string
+            enum: [hard_hat, safety_vest, gloves, safety_glasses, face_mask, safety_boots]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - location
+        - status
+        - ppeRequirements
+        - createdAt
+        - updatedAt
+
+    CreateCameraRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        location:
+          type: string
+        streamUrl:
+          type: string
+        ppeRequirements:
+          type: array
+          items:
+            type: string
+            enum: [hard_hat, safety_vest, gloves, safety_glasses, face_mask, safety_boots]
+      required:
+        - name
+        - location
+        - ppeRequirements
+
+    UpdateCameraRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        location:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, error]
+        streamUrl:
+          type: string
+        ppeRequirements:
+          type: array
+          items:
+            type: string
+            enum: [hard_hat, safety_vest, gloves, safety_glasses, face_mask, safety_boots]
+
+    DetectedPerson:
+      type: object
+      properties:
+        id:
+          type: string
+        confidence:
+          type: number
+        ppe:
+          type: object
+          properties:
+            hard_hat:
+              type: boolean
+            safety_vest:
+              type: boolean
+            gloves:
+              type: boolean
+            safety_glasses:
+              type: boolean
+            face_mask:
+              type: boolean
+            safety_boots:
+              type: boolean
+          required:
+            - hard_hat
+            - safety_vest
+            - gloves
+            - safety_glasses
+            - face_mask
+            - safety_boots
+        compliant:
+          type: boolean
+        missingPpe:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - confidence
+        - ppe
+        - compliant
+        - missingPpe
+
+    DetectionSnapshot:
+      type: object
+      properties:
+        cameraId:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        personCount:
+          type: integer
+        compliantCount:
+          type: integer
+        nonCompliantCount:
+          type: integer
+        complianceRate:
+          type: number
+        detectedPersons:
+          type: array
+          items:
+            $ref: "#/components/schemas/DetectedPerson"
+      required:
+        - cameraId
+        - timestamp
+        - personCount
+        - compliantCount
+        - nonCompliantCount
+        - complianceRate
+        - detectedPersons
+
+    LiveAnalytics:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        totalCameras:
+          type: integer
+        activeCameras:
+          type: integer
+        totalPersonsDetected:
+          type: integer
+        totalCompliant:
+          type: integer
+        totalNonCompliant:
+          type: integer
+        overallComplianceRate:
+          type: number
+        openAlerts:
+          type: integer
+        cameraSnapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/DetectionSnapshot"
+      required:
+        - timestamp
+        - totalCameras
+        - activeCameras
+        - totalPersonsDetected
+        - totalCompliant
+        - totalNonCompliant
+        - overallComplianceRate
+        - openAlerts
+        - cameraSnapshots
+
+    AnalyticsDataPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        cameraId:
+          type: integer
+        personCount:
+          type: integer
+        compliantCount:
+          type: integer
+        nonCompliantCount:
+          type: integer
+        complianceRate:
+          type: number
+      required:
+        - timestamp
+        - personCount
+        - compliantCount
+        - nonCompliantCount
+        - complianceRate
+
+    ComplianceSummary:
+      type: object
+      properties:
+        period:
+          type: string
+        totalDetections:
+          type: integer
+        totalCompliant:
+          type: integer
+        totalNonCompliant:
+          type: integer
+        overallComplianceRate:
+          type: number
+        ppeMissingBreakdown:
+          type: object
+          properties:
+            hard_hat:
+              type: integer
+            safety_vest:
+              type: integer
+            gloves:
+              type: integer
+            safety_glasses:
+              type: integer
+            face_mask:
+              type: integer
+            safety_boots:
+              type: integer
+          required:
+            - hard_hat
+            - safety_vest
+            - gloves
+            - safety_glasses
+            - face_mask
+            - safety_boots
+        cameraBreakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              cameraId:
+                type: integer
+              cameraName:
+                type: string
+              detections:
+                type: integer
+              complianceRate:
+                type: number
+            required:
+              - cameraId
+              - cameraName
+              - detections
+              - complianceRate
+      required:
+        - period
+        - totalDetections
+        - totalCompliant
+        - totalNonCompliant
+        - overallComplianceRate
+        - ppeMissingBreakdown
+        - cameraBreakdown
+
+    Alert:
+      type: object
+      properties:
+        id:
+          type: integer
+        cameraId:
+          type: integer
+        cameraName:
+          type: string
+        type:
+          type: string
+          enum: [missing_ppe, camera_offline, low_compliance]
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        message:
+          type: string
+        missingPpe:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [open, acknowledged, resolved]
+        personCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        acknowledgedAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - cameraId
+        - cameraName
+        - type
+        - severity
+        - message
+        - status
+        - personCount
+        - createdAt
+
+    AlertListResponse:
+      type: object
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Alert"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - alerts
+        - total
+        - offset
+        - limit
+
+    DailyReport:
+      type: object
+      properties:
+        date:
+          type: string
+        totalPersonDetections:
+          type: integer
+        uniqueViolations:
+          type: integer
+        averageComplianceRate:
+          type: number
+        peakHour:
+          type: string
+        peakPersonCount:
+          type: integer
+        alerts:
+          type: integer
+        hourlyData:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsDataPoint"
+        topViolations:
+          type: array
+          items:
+            type: object
+            properties:
+              ppe:
+                type: string
+              count:
+                type: integer
+            required:
+              - ppe
+              - count
+      required:
+        - date
+        - totalPersonDetections
+        - uniqueViolations
+        - averageComplianceRate
+        - peakHour
+        - peakPersonCount
+        - alerts
+        - hourlyData
+        - topViolations

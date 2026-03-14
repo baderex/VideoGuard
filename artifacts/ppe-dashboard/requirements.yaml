@@ -1,0 +1,18 @@
+packages:
+  "recharts": "For rendering compliance trend charts and analytics"
+  "date-fns": "For formatting timestamps and generating report dates"
+  "framer-motion": "For smooth page transitions and industrial dashboard UI animations"
+  "clsx": "Utility for conditionally joining classNames"
+  "tailwind-merge": "Utility for merging tailwind classes"
+  "lucide-react": "For industrial and UI icons"
+  "@radix-ui/react-dialog": "For accessible modals (Add Camera)"
+  "@radix-ui/react-slot": "For component composition"
+  "@radix-ui/react-tooltip": "For UI tooltips"
+  "react-hook-form": "For robust camera creation forms"
+
+images: []
+
+notes:
+  - Base API URL is /api
+  - Using generated hooks from @workspace/api-client-react
+  - Simulating video feed via CSS/React animations since real video stream requires external hardware
