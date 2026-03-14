@@ -1,18 +1,31 @@
 import { useParams, Link } from "wouter";
+import { useState, useCallback } from "react";
 import { useGetCamera, useGetCameraSnapshot, useGetAnalyticsHistory } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Users, ShieldAlert, Activity } from "lucide-react";
+import { ArrowLeft, Users, Activity, Cpu } from "lucide-react";
 import { PpeIconList } from "@/components/ppe-icons";
 import { SimulatedFeed } from "@/components/simulated-feed";
-import { getComplianceColor, getComplianceHex, formatTime, cn } from "@/lib/utils";
+import { getComplianceColor, formatTime, cn } from "@/lib/utils";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+
+interface YoloStats {
+  personCount: number;
+  violationCount: number;
+  complianceRate: number;
+  timestamp: number;
+}
 
 export default function CameraDetail() {
   const params = useParams();
   const id = parseInt(params.id || "0");
+  const [yoloStats, setYoloStats] = useState<YoloStats | null>(null);
+
+  const handleYoloStats = useCallback((stats: YoloStats) => {
+    setYoloStats(stats);
+  }, []);
 
   const { data: camera, isLoading: isLoadingCam } = useGetCamera(id, {
     query: { enabled: !!id }
@@ -63,7 +76,12 @@ export default function CameraDetail() {
           <div className="lg:col-span-2 space-y-6">
             <Card className="overflow-hidden border-primary/20 shadow-[0_0_30px_rgba(0,255,255,0.05)]">
               <div className="p-1 bg-black">
-                <SimulatedFeed snapshot={snapshot} status={camera.status} cameraId={camera.id} />
+                <SimulatedFeed
+                  snapshot={snapshot}
+                  status={camera.status}
+                  cameraId={camera.id}
+                  onYoloStats={handleYoloStats}
+                />
               </div>
             </Card>
 
@@ -93,19 +111,37 @@ export default function CameraDetail() {
           <div className="space-y-6">
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="flex items-center text-sm"><Activity className="w-4 h-4 mr-2" /> Live Telemetry</CardTitle>
+                <CardTitle className="flex items-center text-sm justify-between">
+                  <span className="flex items-center"><Activity className="w-4 h-4 mr-2" /> Live Telemetry</span>
+                  {yoloStats && (
+                    <span className="flex items-center gap-1 text-[10px] font-mono text-green-400/80 bg-green-400/10 px-2 py-0.5 rounded">
+                      <Cpu className="w-3 h-3" /> YOLO LIVE
+                    </span>
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-background/50 rounded-lg p-3 border border-border/50 text-center">
                     <p className="text-xs font-display text-muted-foreground tracking-wider mb-1">TARGETS</p>
-                    <p className="text-2xl font-bold font-mono">{snapshot?.personCount ?? 0}</p>
+                    <p className="text-2xl font-bold font-mono">
+                      {yoloStats?.personCount ?? snapshot?.personCount ?? 0}
+                    </p>
                   </div>
-                  <div className={cn("rounded-lg p-3 border text-center", getComplianceColor(snapshot?.complianceRate ?? 0))}>
+                  <div className={cn("rounded-lg p-3 border text-center", getComplianceColor(yoloStats?.complianceRate ?? snapshot?.complianceRate ?? 0))}>
                     <p className="text-xs font-display tracking-wider mb-1 opacity-80">COMPLIANCE</p>
-                    <p className="text-2xl font-bold font-mono">{Math.round(snapshot?.complianceRate ?? 0)}%</p>
+                    <p className="text-2xl font-bold font-mono">
+                      {Math.round(yoloStats?.complianceRate ?? snapshot?.complianceRate ?? 0)}%
+                    </p>
                   </div>
                 </div>
+                {yoloStats && yoloStats.violationCount > 0 && (
+                  <div className="mt-3 rounded-lg p-2 border border-destructive/40 bg-destructive/10 text-center">
+                    <p className="text-xs font-display text-destructive tracking-wider">
+                      ⚠ {yoloStats.violationCount} PPE VIOLATION{yoloStats.violationCount !== 1 ? "S" : ""} DETECTED
+                    </p>
+                  </div>
+                )}
               </CardContent>
             </Card>
 

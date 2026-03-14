@@ -2,7 +2,7 @@
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+PPE (Personal Protective Equipment) Compliance System — pnpm workspace monorepo using TypeScript + Python. Streams real video feeds with live YOLOv4-based person detection and PPE compliance analysis.
 
 ## Stack
 
@@ -15,6 +15,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
+- **AI/Vision**: Python 3.11, OpenCV DNN (YOLOv4-tiny), ONNX Runtime, FastAPI + Uvicorn
 
 ## Structure
 
