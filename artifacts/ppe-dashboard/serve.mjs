@@ -11,7 +11,7 @@ const args = [
 
 const child = spawn('npx', ['ng', ...args], {
   stdio: 'inherit',
-  env: process.env,
+  env: { ...process.env, NG_CLI_ANALYTICS: 'false' },
   cwd: import.meta.dirname
 });
 
