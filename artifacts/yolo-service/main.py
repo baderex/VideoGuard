@@ -1,17 +1,22 @@
 """
-YOLO PPE Detection Service
-- Downloads YOLOv4-tiny weights on first run (~24 MB)
-- Runs real YOLO object detection via OpenCV DNN (no PyTorch required)
+Unified PPE Detection API Service
+- All REST API routes (cameras, alerts, analytics, reports, health)
+- YOLO inference: Downloads YOLOv4-tiny weights on first run (~24 MB)
+- Real YOLO object detection via OpenCV DNN (no PyTorch required)
 - Person detection from COCO classes, PPE compliance via color analysis
 - Streams annotated MJPEG frames per camera
+- Database seeding on startup
 """
 
 import os
+import sys
 import time
 import threading
 import urllib.request
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 import cv2
 import numpy as np
@@ -19,10 +24,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-app = FastAPI(title="YOLO PPE Detection Service")
+from routes.cameras import router as cameras_router
+from routes.alerts import router as alerts_router
+from routes.analytics import router as analytics_router
+from routes.reports import router as reports_router
+from routes.health import router as health_router
+
+app = FastAPI(title="PPE Detection API")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+
+app.include_router(cameras_router)
+app.include_router(alerts_router)
+app.include_router(analytics_router)
+app.include_router(reports_router)
+app.include_router(health_router)
 
 BASE_PATH = Path(__file__).parent.parent.parent
 CACHE_DIR = BASE_PATH / "artifacts/yolo-service/.cache"
@@ -448,7 +465,7 @@ def generate_mjpeg(cid: int):
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.get("/yolo/stream/{camera_id}")
+@app.get("/api/yolo/stream/{camera_id}")
 def stream(camera_id: int):
     return StreamingResponse(
         generate_mjpeg(camera_id),
@@ -456,7 +473,7 @@ def stream(camera_id: int):
     )
 
 
-@app.get("/yolo/stats/{camera_id}")
+@app.get("/api/yolo/stats/{camera_id}")
 def stats(camera_id: int):
     with stats_lock:
         data = detection_stats.get(camera_id, {
@@ -468,8 +485,8 @@ def stats(camera_id: int):
     return JSONResponse(data)
 
 
-@app.get("/yolo/health")
-def health():
+@app.get("/api/yolo/status")
+def yolo_status():
     return {
         "status": "ok",
         "modelReady": model_ready,
@@ -478,7 +495,31 @@ def health():
     }
 
 
+@app.get("/api/yolo/health")
+def yolo_health():
+    return {
+        "status": "ok",
+        "modelReady": model_ready,
+        "netLoaded": net is not None,
+        "classes": len(class_names),
+    }
+
+
+@app.get("/api/health")
+def api_health():
+    return {"status": "ok"}
+
+
+def _run_seed():
+    try:
+        from seed import auto_seed_if_empty
+        auto_seed_if_empty()
+    except Exception as e:
+        print(f"[seed] Error: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 6000))
+    port = int(os.environ.get("PORT", 8080))
+    threading.Thread(target=_run_seed, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

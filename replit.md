@@ -10,12 +10,12 @@ PPE (Personal Protective Equipment) Compliance System — pnpm workspace monorep
 - **Node.js version**: 24
 - **Package manager**: pnpm
 - **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
+- **API framework**: FastAPI + Uvicorn (unified Python backend)
+- **Database**: PostgreSQL + psycopg2-binary (Python) / Drizzle ORM (schema definitions)
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
-- **AI/Vision**: Python 3.11, OpenCV DNN (YOLOv4-tiny), ONNX Runtime, FastAPI + Uvicorn
+- **Build**: esbuild (CJS launcher bundle)
+- **AI/Vision**: Python 3.11, OpenCV DNN (YOLOv4-tiny), FastAPI + Uvicorn
 
 ## Structure
 
@@ -53,15 +53,26 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 
 ### `artifacts/api-server` (`@workspace/api-server`)
 
-Express 5 API server. Routes live in `src/routes/` and use `@workspace/api-zod` for request and response validation and `@workspace/db` for persistence.
+Thin Node.js launcher that spawns the unified Python FastAPI service (`artifacts/yolo-service/main.py`). All API logic lives in Python.
 
-- Entry: `src/index.ts` — reads `PORT`, starts Express
-- App setup: `src/app.ts` — mounts CORS, JSON/urlencoded parsing, routes at `/api`
-- Routes: `src/routes/index.ts` mounts sub-routers; `src/routes/health.ts` exposes `GET /health` (full path: `/api/health`)
-- Depends on: `@workspace/db`, `@workspace/api-zod`
-- `pnpm --filter @workspace/api-server run dev` — run the dev server
+- Entry: `src/index.ts` — finds Python, installs pip dependencies, spawns `main.py` on `PORT`
+- `pnpm --filter @workspace/api-server run dev` — run the dev server (launches Python)
 - `pnpm --filter @workspace/api-server run build` — production esbuild bundle (`dist/index.cjs`)
-- Build bundles an allowlist of deps (express, cors, pg, drizzle-orm, zod, etc.) and externalizes the rest
+
+### `artifacts/yolo-service`
+
+Unified FastAPI backend serving all REST API routes and YOLO detection:
+
+- `main.py` — FastAPI app with YOLO detection routes and MJPEG streaming
+- `db.py` — PostgreSQL connection helper using psycopg2
+- `simulation.py` — simulated PPE detection snapshot logic
+- `seed.py` — database seeder (runs on startup if tables empty)
+- `routes/cameras.py` — camera CRUD endpoints
+- `routes/alerts.py` — alert list/acknowledge/resolve endpoints
+- `routes/analytics.py` — live analytics, history, compliance summary
+- `routes/reports.py` — daily compliance reports
+- `routes/health.py` — health check endpoint
+- All routes prefixed with `/api/` (e.g., `/api/cameras`, `/api/yolo/stream/{id}`)
 
 ### `lib/db` (`@workspace/db`)
 

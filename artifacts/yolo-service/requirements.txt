@@ -2,3 +2,4 @@ opencv-python-headless
 fastapi
 uvicorn[standard]
 numpy
+psycopg2-binary
