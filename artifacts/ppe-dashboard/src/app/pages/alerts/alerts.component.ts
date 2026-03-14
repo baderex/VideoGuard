@@ -1,4 +1,5 @@
 import { Component, inject, OnInit, signal, computed } from '@angular/core';
+import { UpperCasePipe } from '@angular/common';
 import { AlertService } from '../../services/alert.service';
 import { ToastService } from '../../services/toast.service';
 import { Alert, AlertStatus, AlertSeverity } from '../../lib/models';
@@ -7,6 +8,7 @@ import { formatDateTime } from '../../lib/utils';
 @Component({
   selector: 'app-alerts',
   standalone: true,
+  imports: [UpperCasePipe],
   template: `
     <div class="space-y-6">
       <div>
