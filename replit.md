@@ -53,7 +53,7 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 
 ### `artifacts/api-server` (`@workspace/api-server`)
 
-Thin Node.js launcher that spawns the unified Python FastAPI service (`artifacts/yolo-service/main.py`). All API logic lives in Python.
+Thin Node.js launcher that spawns the unified Python FastAPI service (`artifacts/yolo-service/main.py`). All API logic lives in Python. This launcher exists because the Replit artifact system requires a registered artifact with an `artifact.toml` — the api-server artifact registration is retained for this purpose. The launcher can be removed if the artifact system gains support for directly registering Python services.
 
 - Entry: `src/index.ts` — finds Python, installs pip dependencies, spawns `main.py` on `PORT`
 - `pnpm --filter @workspace/api-server run dev` — run the dev server (launches Python)
