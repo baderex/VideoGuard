@@ -5,3 +5,4 @@ numpy
 psycopg2-binary
 python-jose[cryptography]
 bcrypt
+mediapipe
