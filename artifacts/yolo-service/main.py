@@ -34,6 +34,7 @@ from routes.sites import router as sites_router
 from routes.zones import router as zones_router
 from routes.auth import router as auth_router
 from routes.users import router as users_router
+from routes.init import router as init_router
 from auth_utils import decode_token
 
 _ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
@@ -51,6 +52,7 @@ app.add_middleware(
 # Public paths: /api/auth/*, /api/yolo/stream*, /api/screenshots/*
 _PUBLIC_PREFIXES = (
     "/api/auth/",
+    "/api/init",
     "/api/yolo/stream",
     "/api/yolo/stream-raw",
     "/api/screenshots/",
@@ -100,6 +102,7 @@ app.include_router(reports_router)
 app.include_router(health_router)
 app.include_router(sites_router)
 app.include_router(zones_router)
+app.include_router(init_router)
 
 BASE_PATH = Path(__file__).parent.parent.parent
 CACHE_DIR = BASE_PATH / "artifacts/yolo-service/.cache"
