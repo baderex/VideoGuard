@@ -1,10 +1,27 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from db import get_cursor
+from auth_utils import get_current_user
 from simulation import generate_detection_snapshot
 
 router = APIRouter()
+
+
+class CreateCameraRequest(BaseModel):
+    name: str
+    location: str = ""
+    streamUrl: Optional[str] = None
+    ppeRequirements: List[str] = []
+    siteId: Optional[int] = None
+
+
+def _require_editor(user: dict = Depends(get_current_user)) -> dict:
+    if user["role"] not in ("admin", "support"):
+        raise HTTPException(status_code=403, detail="Admin or Support role required")
+    return user
 
 
 def _camera_dict(row):
@@ -13,6 +30,7 @@ def _camera_dict(row):
         d["ppe_requirements"] = []
     d["ppeRequirements"] = d.pop("ppe_requirements", [])
     d["streamUrl"] = d.pop("stream_url", None)
+    d["siteId"] = d.pop("site_id", None)
     d["createdAt"] = d.pop("created_at", None)
     d["updatedAt"] = d.pop("updated_at", None)
     if d["createdAt"] and hasattr(d["createdAt"], "isoformat"):
@@ -31,17 +49,12 @@ def list_cameras():
 
 
 @router.post("/api/cameras", status_code=201)
-def create_camera(body: dict):
-    name = body.get("name", "")
-    location = body.get("location", "")
-    stream_url = body.get("streamUrl")
-    ppe_requirements = body.get("ppeRequirements", [])
-
+def create_camera(body: CreateCameraRequest, _user: dict = Depends(_require_editor)):
     with get_cursor(commit=True) as cur:
         cur.execute(
-            """INSERT INTO cameras (name, location, stream_url, ppe_requirements)
-               VALUES (%s, %s, %s, %s) RETURNING *""",
-            (name, location, stream_url, ppe_requirements),
+            """INSERT INTO cameras (name, location, stream_url, ppe_requirements, site_id)
+               VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+            (body.name, body.location, body.streamUrl, body.ppeRequirements, body.siteId),
         )
         camera = cur.fetchone()
     return _camera_dict(camera)
@@ -58,7 +71,7 @@ def get_camera(camera_id: int):
 
 
 @router.patch("/api/cameras/{camera_id}")
-def update_camera(camera_id: int, body: dict):
+def update_camera(camera_id: int, body: dict, _user: dict = Depends(_require_editor)):
     allowed = {"name", "location", "status", "streamUrl", "ppeRequirements"}
     col_map = {
         "name": "name",
@@ -91,7 +104,7 @@ def update_camera(camera_id: int, body: dict):
 
 
 @router.delete("/api/cameras/{camera_id}", status_code=204)
-def delete_camera(camera_id: int):
+def delete_camera(camera_id: int, _user: dict = Depends(_require_editor)):
     with get_cursor(commit=True) as cur:
         cur.execute("DELETE FROM cameras WHERE id = %s", (camera_id,))
     return None

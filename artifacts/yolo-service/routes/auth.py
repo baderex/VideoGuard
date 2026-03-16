@@ -1,5 +1,8 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+import time
+import threading
+from collections import defaultdict
+from fastapi import APIRouter, HTTPException, Depends, Request
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 from db import get_cursor
@@ -7,10 +10,43 @@ from auth_utils import verify_password, create_token, get_current_user
 
 router = APIRouter(prefix="/api/auth")
 
+_rate_lock = threading.Lock()
+_attempts: dict = defaultdict(list)
+_WINDOW_SECS = 60
+_MAX_ATTEMPTS = 10
+
+
+def _check_rate_limit(ip: str) -> None:
+    now = time.monotonic()
+    with _rate_lock:
+        window = [t for t in _attempts[ip] if now - t < _WINDOW_SECS]
+        _attempts[ip] = window
+        if len(window) >= _MAX_ATTEMPTS:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many login attempts. Please wait a minute and try again.",
+            )
+        _attempts[ip].append(now)
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+    @field_validator("username")
+    @classmethod
+    def username_valid(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 100:
+            raise ValueError("Invalid username")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def password_valid(cls, v: str) -> str:
+        if not v or len(v) > 200:
+            raise ValueError("Invalid password")
+        return v
 
 
 def _safe_user(row: dict) -> dict:
@@ -25,7 +61,9 @@ def _safe_user(row: dict) -> dict:
 
 
 @router.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(client_ip)
     with get_cursor() as cur:
         cur.execute(
             """SELECT u.*, s.name AS site_name

@@ -36,9 +36,15 @@ from routes.auth import router as auth_router
 from routes.users import router as users_router
 from auth_utils import decode_token
 
+_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+
 app = FastAPI(title="PPE Detection API")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_credentials=True,
 )
 
 # Auth middleware — sets request.state.user for protected routes
@@ -72,6 +78,18 @@ async def auth_middleware(request, call_next):
     else:
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
+
 
 app.include_router(auth_router)
 app.include_router(users_router)

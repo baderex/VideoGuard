@@ -7,7 +7,17 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 
-SECRET_KEY = os.environ.get("JWT_SECRET", "videoguard-industrial-secret-2026")
+_DEFAULT_SECRET = "videoguard-industrial-secret-2026"
+SECRET_KEY = os.environ.get("JWT_SECRET", "")
+if not SECRET_KEY:
+    import warnings
+    warnings.warn(
+        "\n\u26a0\ufe0f  JWT_SECRET environment variable is not set!\n"
+        "   Using a weak default secret — this is INSECURE in production.\n"
+        "   Set JWT_SECRET to a strong random value (32+ characters).",
+        stacklevel=2,
+    )
+    SECRET_KEY = _DEFAULT_SECRET
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
 
