@@ -36,6 +36,7 @@ from routes.auth import router as auth_router
 from routes.users import router as users_router
 from routes.init import router as init_router
 from auth_utils import decode_token
+from fall_detection import is_fallen_pose
 
 _ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 
@@ -374,11 +375,8 @@ def analyze_ppe(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> Tuple[
     return vest, hat, gloves, goggles
 
 
-def is_fallen(x1: int, y1: int, x2: int, y2: int) -> bool:
-    """Returns True if bounding-box aspect ratio suggests a fallen person (w > 0.75 * h)."""
-    w = max(1, x2 - x1)
-    h = max(1, y2 - y1)
-    return (w / h) > 0.75
+# is_fallen() replaced by is_fallen_pose() from fall_detection.py
+# (MediaPipe Pose skeleton keypoint analysis — aspect-ratio used as fallback only)
 
 
 def detect_fire_smoke(frame: np.ndarray) -> Tuple[bool, bool, float, float]:
@@ -728,7 +726,7 @@ def run_camera(cid: int):
                 for p in persons:
                     x1, y1, x2, y2, conf = p["x1"], p["y1"], p["x2"], p["y2"], p["conf"]
                     vest, hat, gloves, goggles = analyze_ppe(frame, x1, y1, x2, y2)
-                    fallen = is_fallen(x1, y1, x2, y2)
+                    fallen, _fall_reason = is_fallen_pose(frame, x1, y1, x2, y2)
 
                     # Red zone check: use person foot-centre (cx, foot) in normalised coords
                     cx_n   = ((x1 + x2) / 2.0) / w_f
