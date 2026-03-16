@@ -1,11 +1,13 @@
-import { Component, inject, OnInit, OnDestroy, signal } from '@angular/core';
+import { Component, inject, OnInit, OnDestroy, signal, ElementRef, ViewChild } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Subscription, switchMap, of, EMPTY } from 'rxjs';
+import { Subscription, switchMap, EMPTY } from 'rxjs';
+import { FormsModule } from '@angular/forms';
 import { BaseChartDirective } from 'ng2-charts';
 import { ChartConfiguration } from 'chart.js';
 import { CameraService } from '../../services/camera.service';
 import { AnalyticsService } from '../../services/analytics.service';
-import { Camera, DetectionSnapshot, AnalyticsDataPoint, YoloStats } from '../../lib/models';
+import { ZoneService } from '../../services/zone.service';
+import { Camera, DetectionSnapshot, AnalyticsDataPoint, YoloStats, Zone, ZonePoint } from '../../lib/models';
 import { getComplianceColor, formatTime } from '../../lib/utils';
 import { SimulatedFeedComponent } from '../../components/simulated-feed.component';
 import { PpeIconListComponent } from '../../components/ppe-icons.component';
@@ -13,7 +15,7 @@ import { PpeIconListComponent } from '../../components/ppe-icons.component';
 @Component({
   selector: 'app-camera-detail',
   standalone: true,
-  imports: [RouterLink, BaseChartDirective, SimulatedFeedComponent, PpeIconListComponent],
+  imports: [RouterLink, BaseChartDirective, SimulatedFeedComponent, PpeIconListComponent, FormsModule],
   template: `
     @if (isLoading()) {
       <div class="flex justify-center py-20 text-primary">
@@ -45,13 +47,161 @@ import { PpeIconListComponent } from '../../components/ppe-icons.component';
             <!-- Feed Card -->
             <div class="rounded-xl border border-primary/20 bg-card/80 backdrop-blur-md shadow-[0_0_30px_rgba(0,255,255,0.05)] overflow-hidden relative">
               <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMSIgY3k9IjEiIHI9IjEiIGZpbGw9InJnYmEoMjU1LDI1NSwyNTUsMC4wMykiLz48L3N2Zz4=')] pointer-events-none opacity-50"></div>
-              <div class="relative z-10 p-1 bg-black">
-                <app-simulated-feed
-                  [snapshot]="snapshot()"
-                  [status]="camera()!.status"
-                  [cameraId]="camera()!.id"
-                  (yoloStats)="onYoloStats($event)"
-                />
+              <div class="relative z-10">
+                <!-- Feed mode toggle -->
+                <div class="flex items-center justify-between px-4 py-2 border-b border-primary/20 bg-black/40">
+                  <span class="text-xs font-display uppercase tracking-widest text-muted-foreground">Feed Mode</span>
+                  <div class="flex items-center gap-1 p-0.5 rounded-lg bg-background/50 border border-border/50">
+                    <button (click)="feedMode.set('detection')"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-display uppercase tracking-wider transition-all duration-200"
+                      [class]="feedMode() === 'detection' ? 'bg-primary text-primary-foreground shadow-[0_0_10px_rgba(0,255,255,0.3)]' : 'text-muted-foreground hover:text-foreground'">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M7 21h10"/><path d="M12 17v4"/></svg>
+                      Detection
+                    </button>
+                    <button (click)="feedMode.set('raw')"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-display uppercase tracking-wider transition-all duration-200"
+                      [class]="feedMode() === 'raw' ? 'bg-primary text-primary-foreground shadow-[0_0_10px_rgba(0,255,255,0.3)]' : 'text-muted-foreground hover:text-foreground'">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                      Raw Feed
+                    </button>
+                  </div>
+                </div>
+                <!-- Feed + Zone drawing overlay -->
+                <div class="relative bg-black" #feedContainer>
+                  <app-simulated-feed
+                    [snapshot]="snapshot()"
+                    [status]="camera()!.status"
+                    [cameraId]="camera()!.id"
+                    [mode]="feedMode()"
+                    (yoloStats)="onYoloStats($event)"
+                  />
+                  <!-- Zone drawing overlay — only active in draw mode -->
+                  @if (drawMode()) {
+                    <div class="absolute inset-0 z-20"
+                         style="cursor: crosshair;"
+                         (click)="onZoneCanvasClick($event)"
+                         (contextmenu)="$event.preventDefault(); undoLastPoint()">
+                      <svg class="w-full h-full" style="position:absolute;inset:0;">
+                        <!-- Existing polygon being drawn -->
+                        @if (draftPoints().length >= 2) {
+                          <polyline
+                            [attr.points]="draftSvgPoints()"
+                            fill="none"
+                            stroke="#ff3333"
+                            stroke-width="2"
+                            stroke-dasharray="6 3"
+                            opacity="0.9"
+                          />
+                        }
+                        <!-- Vertices -->
+                        @for (pt of draftPoints(); track $index) {
+                          <circle
+                            [attr.cx]="pt.px + '%'"
+                            [attr.cy]="pt.py + '%'"
+                            r="5"
+                            fill="#ff3333"
+                            stroke="white"
+                            stroke-width="1.5"
+                          />
+                          <text
+                            [attr.x]="pt.px + '%'"
+                            [attr.y]="(pt.py - 1.5) + '%'"
+                            text-anchor="middle"
+                            font-size="9"
+                            fill="white"
+                            font-family="monospace"
+                          >{{ $index + 1 }}</text>
+                        }
+                        <!-- Close line back to first point -->
+                        @if (draftPoints().length >= 3) {
+                          <line
+                            [attr.x1]="draftPoints()[draftPoints().length-1].px + '%'"
+                            [attr.y1]="draftPoints()[draftPoints().length-1].py + '%'"
+                            [attr.x2]="draftPoints()[0].px + '%'"
+                            [attr.y2]="draftPoints()[0].py + '%'"
+                            stroke="#ff333380"
+                            stroke-width="1.5"
+                            stroke-dasharray="4 4"
+                          />
+                        }
+                      </svg>
+                    </div>
+                  }
+                  <!-- Draw mode instruction banner -->
+                  @if (drawMode()) {
+                    <div class="absolute bottom-0 left-0 right-0 z-30 bg-black/80 border-t border-destructive/50 px-3 py-2 flex items-center justify-between">
+                      <div class="flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-destructive animate-pulse"></span>
+                        <span class="text-xs font-mono text-destructive">ZONE DRAW MODE — click to add vertices, right-click to undo</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        @if (draftPoints().length >= 3) {
+                          <button (click)="saveZone()"
+                            class="px-3 py-1 text-xs font-display uppercase rounded bg-destructive text-white hover:bg-destructive/80 transition-all">
+                            Save Zone ({{ draftPoints().length }} pts)
+                          </button>
+                        }
+                        <button (click)="cancelDraw()"
+                          class="px-3 py-1 text-xs font-display uppercase rounded bg-white/10 text-white hover:bg-white/20 transition-all">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  }
+                </div>
+              </div>
+            </div>
+
+            <!-- Red Zones Panel -->
+            <div class="rounded-xl border border-destructive/30 bg-card/80 backdrop-blur-md shadow-lg shadow-black/20 overflow-hidden relative">
+              <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMSIgY3k9IjEiIHI9IjEiIGZpbGw9InJnYmEoMjU1LDI1NSwyNTUsMC4wMykiLz48L3N2Zz4=')] pointer-events-none opacity-50"></div>
+              <div class="relative z-10">
+                <div class="flex items-center justify-between p-4 border-b border-destructive/20">
+                  <div class="flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-destructive"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    <h3 class="text-sm font-display font-semibold tracking-wider text-destructive">Red Zones</h3>
+                    <span class="text-xs font-mono text-muted-foreground">({{ zones().length }} defined)</span>
+                  </div>
+                  @if (!drawMode()) {
+                    <div class="flex items-center gap-2">
+                      <input [(ngModel)]="newZoneName" placeholder="Zone name…"
+                        class="h-7 px-2 text-xs bg-background/50 border border-border/50 rounded text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-destructive/50 w-32" />
+                      <button (click)="startDraw()"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-display uppercase tracking-wider rounded-md bg-destructive/20 border border-destructive/40 text-destructive hover:bg-destructive/30 transition-all">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                        Draw Zone
+                      </button>
+                    </div>
+                  }
+                </div>
+                <div class="p-4 space-y-2">
+                  @if (!zones().length) {
+                    <div class="text-center py-6 text-muted-foreground font-mono text-xs">NO_ZONES_DEFINED — Click "Draw Zone" to add a restricted area</div>
+                  }
+                  @for (zone of zones(); track zone.id) {
+                    <div class="flex items-center justify-between p-3 rounded-lg border bg-background/40"
+                         [class]="zone.active ? 'border-destructive/40' : 'border-border/30 opacity-50'">
+                      <div class="flex items-center gap-3">
+                        <div class="w-3 h-3 rounded-sm flex-shrink-0" [style.background]="zone.color"></div>
+                        <div>
+                          <p class="text-sm font-display text-foreground">{{ zone.name }}</p>
+                          <p class="text-xs font-mono text-muted-foreground">{{ zone.points.length }} vertices</p>
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <button (click)="toggleZone(zone)"
+                          class="px-2 py-1 text-[10px] font-display uppercase rounded border transition-all"
+                          [class]="zone.active ? 'border-success/40 bg-success/10 text-success hover:bg-success/20' : 'border-border/40 bg-background/50 text-muted-foreground hover:bg-background'">
+                          {{ zone.active ? 'Active' : 'Inactive' }}
+                        </button>
+                        <button (click)="deleteZone(zone)"
+                          class="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all">
+                          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                        </button>
+                      </div>
+                    </div>
+                  }
+                </div>
               </div>
             </div>
 
@@ -110,10 +260,14 @@ import { PpeIconListComponent } from '../../components/ppe-icons.component';
                   @if (yoloStats() && yoloStats()!.violationCount > 0) {
                     <div class="mt-3 rounded-lg p-2 border border-destructive/40 bg-destructive/10 text-center">
                       <p class="text-xs font-display text-destructive tracking-wider">
-                        ⚠ {{ yoloStats()!.violationCount }} PPE VIOLATION{{ yoloStats()!.violationCount !== 1 ? 'S' : '' }} DETECTED
+                        ⚠ {{ yoloStats()!.violationCount }} VIOLATION{{ yoloStats()!.violationCount !== 1 ? 'S' : '' }} DETECTED
                       </p>
                     </div>
                   }
+                  <!-- PPE Expansion notice -->
+                  <div class="mt-3 rounded-lg p-2 border border-primary/20 bg-primary/5">
+                    <p class="text-[10px] font-mono text-muted-foreground">Detecting: VEST · HAT · GLOVES · GOGGLES · FALL · ZONE · FIRE · SMOKE</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -165,9 +319,12 @@ import { PpeIconListComponent } from '../../components/ppe-icons.component';
   `
 })
 export class CameraDetailComponent implements OnInit, OnDestroy {
+  @ViewChild('feedContainer') feedContainerRef!: ElementRef<HTMLDivElement>;
+
   private route = inject(ActivatedRoute);
   private cameraService = inject(CameraService);
   private analyticsService = inject(AnalyticsService);
+  private zoneService = inject(ZoneService);
   private subs: Subscription[] = [];
 
   isLoading = signal(true);
@@ -175,6 +332,11 @@ export class CameraDetailComponent implements OnInit, OnDestroy {
   snapshot = signal<DetectionSnapshot | null>(null);
   yoloStats = signal<YoloStats | null>(null);
   lineChartData = signal<ChartConfiguration<'line'>['data'] | null>(null);
+  feedMode = signal<'detection' | 'raw'>('detection');
+  zones = signal<Zone[]>([]);
+  drawMode = signal(false);
+  draftPoints = signal<{ px: number; py: number; nx: number; ny: number }[]>([]);
+  newZoneName = 'Restricted Zone';
 
   Math = Math;
   getComplianceColor = getComplianceColor;
@@ -208,6 +370,10 @@ export class CameraDetailComponent implements OnInit, OnDestroy {
     }
   };
 
+  draftSvgPoints(): string {
+    return this.draftPoints().map(p => `${p.px}% ${p.py}%`).join(', ');
+  }
+
   ngOnInit() {
     this.subs.push(
       this.route.params.pipe(
@@ -221,6 +387,7 @@ export class CameraDetailComponent implements OnInit, OnDestroy {
           this.camera.set(cam);
           this.isLoading.set(false);
           this.setupPolling(cam);
+          this.loadZones(cam.id);
         },
         error: () => {
           this.isLoading.set(false);
@@ -243,6 +410,79 @@ export class CameraDetailComponent implements OnInit, OnDestroy {
 
   getComplianceRate(): number {
     return this.yoloStats()?.complianceRate ?? this.snapshot()?.complianceRate ?? 0;
+  }
+
+  loadZones(cameraId: number) {
+    this.zoneService.getZones(cameraId).subscribe({
+      next: z => this.zones.set(z),
+      error: () => {}
+    });
+  }
+
+  startDraw() {
+    this.draftPoints.set([]);
+    this.drawMode.set(true);
+  }
+
+  cancelDraw() {
+    this.drawMode.set(false);
+    this.draftPoints.set([]);
+  }
+
+  undoLastPoint() {
+    const pts = this.draftPoints();
+    if (pts.length > 0) {
+      this.draftPoints.set(pts.slice(0, -1));
+    }
+  }
+
+  onZoneCanvasClick(event: MouseEvent) {
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const px = ((event.clientX - rect.left) / rect.width) * 100;
+    const py = ((event.clientY - rect.top) / rect.height) * 100;
+    const nx = (event.clientX - rect.left) / rect.width;
+    const ny = (event.clientY - rect.top) / rect.height;
+    this.draftPoints.update(pts => [...pts, { px, py, nx, ny }]);
+  }
+
+  saveZone() {
+    const cam = this.camera();
+    if (!cam) return;
+    const pts = this.draftPoints();
+    if (pts.length < 3) return;
+
+    const points: ZonePoint[] = pts.map(p => ({ x: +p.nx.toFixed(4), y: +p.ny.toFixed(4) }));
+    this.zoneService.createZone(cam.id, this.newZoneName || 'Restricted Zone', points, '#ff3333').subscribe({
+      next: zone => {
+        this.zones.update(z => [...z, zone]);
+        this.zoneService.reloadZones(cam.id).subscribe();
+        this.cancelDraw();
+      },
+      error: err => console.error('Zone save failed', err)
+    });
+  }
+
+  toggleZone(zone: Zone) {
+    const cam = this.camera();
+    if (!cam) return;
+    this.zoneService.toggleZone(cam.id, zone.id, !zone.active).subscribe({
+      next: updated => {
+        this.zones.update(zs => zs.map(z => z.id === zone.id ? updated : z));
+        this.zoneService.reloadZones(cam.id).subscribe();
+      }
+    });
+  }
+
+  deleteZone(zone: Zone) {
+    const cam = this.camera();
+    if (!cam) return;
+    this.zoneService.deleteZone(cam.id, zone.id).subscribe({
+      next: () => {
+        this.zones.update(zs => zs.filter(z => z.id !== zone.id));
+        this.zoneService.reloadZones(cam.id).subscribe();
+      }
+    });
   }
 
   private setupPolling(cam: Camera) {
