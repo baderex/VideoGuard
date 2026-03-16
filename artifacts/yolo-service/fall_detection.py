@@ -1,92 +1,151 @@
 """
-MediaPipe Pose-based fall detection for VideoGuard.
+MediaPipe Pose-based fall detection for VideoGuard (mediapipe 0.10.x Task API).
 
 Strategy:
-  1. For each YOLO-detected person bounding box, crop the person region
-     (padded by 15% for better skeleton coverage).
-  2. Run MediaPipe Pose (model_complexity=0 — fastest) on the crop.
-  3. Use normalised keypoint Y-coordinates (0=top, 1=bottom of crop) to
-     determine body orientation:
+  1. At module load, download the PoseLandmarker Lite model (~5.7 MB) once
+     and cache it next to this file as pose_landmarker_lite.task.
+  2. For each YOLO-detected person bounding box, crop the region
+     (padded 15%) and run PoseLandmarker on it.
+  3. Use normalised landmark Y-coordinates (0=top, 1=bottom of crop):
 
-     STRONG   : shoulder_y  > knee_y   → torso/upper body is below knees
-     PRIMARY  : hip_y       > knee_y   → hips below knees
-     STANDING : hip_y       < knee_y   AND shoulder_y < knee_y → upright
+     STRONG  : shoulder_y > knee_y   (upper body below knees)
+     PRIMARY : hip_y      > knee_y   (hips below knees)
+     STANDING: hip_y      < knee_y   AND shoulder_y < knee_y
 
   4. Fall back to bounding-box aspect ratio (w/h > 0.75) when:
-       - MediaPipe is not installed
-       - The crop is too small (< 48 px) to get reliable landmarks
-       - Pose landmarks are not detected in the crop
-       - All relevant keypoints have visibility < MIN_VISIBILITY threshold
+       - Model download / init fails
+       - Crop too small (< 48 px)
+       - No landmarks detected in the crop
+       - Relevant keypoints have visibility < MIN_VISIBILITY
 
 Thread safety:
-  Each camera runs in its own thread. A single mediapipe.solutions.pose.Pose
-  instance is NOT thread-safe, so we use threading.local() to give each
-  thread its own instance (lazily initialised on first use).
+  PoseLandmarker (IMAGE mode) is NOT thread-safe when shared, so each
+  camera thread gets its own instance via threading.local().
 """
 
+import os
 import threading
-import numpy as np
-import cv2
+import urllib.request
+from pathlib import Path
 from typing import Optional, Tuple
 
-# ── MediaPipe landmark indices ────────────────────────────────────────────────
+import cv2
+import numpy as np
+
+# ── PoseLandmarker landmark indices (same as COCO 17-pt) ─────────────────────
 _LEFT_SHOULDER  = 11
 _RIGHT_SHOULDER = 12
 _LEFT_HIP       = 23
 _RIGHT_HIP      = 24
 _LEFT_KNEE      = 25
 _RIGHT_KNEE     = 26
-_LEFT_ANKLE     = 27
-_RIGHT_ANKLE    = 28
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 MIN_VISIBILITY   = 0.40   # ignore keypoints with visibility below this
-MIN_CROP_PX      = 48     # skip pose on crops smaller than this in either dim
-CROP_PAD_RATIO   = 0.15   # pad bbox by 15% on each side before cropping
-ASPECT_THRESHOLD = 0.75   # fallback: w/h ratio above this → fallen
+MIN_CROP_PX      = 48     # skip pose on crops smaller than this (either dim)
+CROP_PAD_RATIO   = 0.15   # pad bbox by 15% on each side for skeleton context
+ASPECT_THRESHOLD = 0.75   # fallback: w/h > this → fallen
+
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "pose_landmarker/pose_landmarker_lite/float16/latest/"
+    "pose_landmarker_lite.task"
+)
+_MODEL_PATH = str(Path(__file__).parent / "pose_landmarker_lite.task")
 
 # ── Module-level state ────────────────────────────────────────────────────────
-_local         = threading.local()
-_mp_available  = False
-_mp_pose_mod   = None
-
-try:
-    import mediapipe as mp
-    _mp_pose_mod  = mp.solutions.pose
-    _mp_available = True
-    print("[FallDetect] MediaPipe Pose loaded — using skeleton keypoint fall detection.")
-except ImportError:
-    print("[FallDetect] MediaPipe not installed — falling back to aspect-ratio heuristic.")
+_local        = threading.local()
+_mp_available = False
+_PoseLandmarker       = None
+_PoseLandmarkerOpts   = None
+_RunningMode          = None
+_MpImage              = None
 
 
-# ── Thread-local pose instance ────────────────────────────────────────────────
+def _ensure_model() -> bool:
+    """Download the model file if not already cached. Returns True on success."""
+    if os.path.exists(_MODEL_PATH) and os.path.getsize(_MODEL_PATH) > 100_000:
+        return True
+    try:
+        print("[FallDetect] Downloading PoseLandmarker Lite model (~5.7 MB)...")
+        urllib.request.urlretrieve(_MODEL_URL, _MODEL_PATH)
+        print(f"[FallDetect] Model cached at {_MODEL_PATH}")
+        return True
+    except Exception as exc:
+        print(f"[FallDetect] Model download failed: {exc}")
+        return False
 
-def _get_pose():
-    """Return a per-thread MediaPipe Pose instance, creating it on first access."""
+
+def _init_mediapipe():
+    global _mp_available, _PoseLandmarker, _PoseLandmarkerOpts, _RunningMode, _MpImage
+    try:
+        from mediapipe.tasks.python.core.base_options import BaseOptions
+        from mediapipe.tasks.python.vision.pose_landmarker import (
+            PoseLandmarker, PoseLandmarkerOptions,
+        )
+        from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
+            VisionTaskRunningMode,
+        )
+        import mediapipe as _mp
+
+        if not _ensure_model():
+            print("[FallDetect] Model unavailable — using aspect-ratio fallback.")
+            return
+
+        # Smoke-test: verify we can actually create an instance
+        _opts_cls  = PoseLandmarkerOptions
+        _opts_test = _opts_cls(
+            base_options=BaseOptions(model_asset_path=_MODEL_PATH),
+            running_mode=VisionTaskRunningMode.IMAGE,
+            min_pose_detection_confidence=0.45,
+        )
+        _lm_test = PoseLandmarker.create_from_options(_opts_test)
+        _lm_test.close()
+
+        _PoseLandmarker     = PoseLandmarker
+        _PoseLandmarkerOpts = _opts_cls
+        _RunningMode        = VisionTaskRunningMode
+        _MpImage            = _mp.Image
+        _mp_available       = True
+        print("[FallDetect] MediaPipe PoseLandmarker Task API loaded — skeleton fall detection active.")
+
+    except Exception as exc:
+        print(f"[FallDetect] MediaPipe init failed ({exc.__class__.__name__}: {exc}) — aspect-ratio fallback.")
+
+
+_init_mediapipe()
+
+
+# ── Per-thread PoseLandmarker instance ───────────────────────────────────────
+
+def _get_landmarker() -> Optional[object]:
+    """Return a thread-local PoseLandmarker, creating it lazily."""
     if not _mp_available:
         return None
-    if not hasattr(_local, "pose"):
-        _local.pose = _mp_pose_mod.Pose(
-            static_image_mode=True,
-            model_complexity=0,           # fastest model variant (~50 ms / crop on CPU)
-            enable_segmentation=False,
-            min_detection_confidence=0.45,
-            min_tracking_confidence=0.45,
-        )
-    return _local.pose
+    if not hasattr(_local, "lm"):
+        try:
+            from mediapipe.tasks.python.core.base_options import BaseOptions
+            opts = _PoseLandmarkerOpts(
+                base_options=BaseOptions(model_asset_path=_MODEL_PATH),
+                running_mode=_RunningMode.IMAGE,
+                min_pose_detection_confidence=0.45,
+            )
+            _local.lm = _PoseLandmarker.create_from_options(opts)
+        except Exception as exc:
+            print(f"[FallDetect] Thread-local landmarker creation failed: {exc}")
+            _local.lm = None
+    return _local.lm
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _visible_y(landmarks, idx: int) -> Optional[float]:
-    """Return normalised Y of landmark idx if visibility >= threshold, else None."""
+def _lm_y(landmarks: list, idx: int) -> Optional[float]:
     lm = landmarks[idx]
     return lm.y if lm.visibility >= MIN_VISIBILITY else None
 
 
-def _avg_y(landmarks, *indices) -> Optional[float]:
-    """Average visible Y-coordinates of the given landmark indices."""
-    vals = [_visible_y(landmarks, i) for i in indices]
+def _avg_y(landmarks: list, *indices) -> Optional[float]:
+    vals = [_lm_y(landmarks, i) for i in indices]
     vals = [v for v in vals if v is not None]
     return sum(vals) / len(vals) if vals else None
 
@@ -104,75 +163,57 @@ def is_fallen_pose(
     x1: int, y1: int, x2: int, y2: int,
 ) -> Tuple[bool, str]:
     """
-    Determine if the person in the given bounding box has fallen.
+    Determine whether the person in the bounding box has fallen.
 
-    Parameters
-    ----------
-    frame : np.ndarray  Full camera frame (BGR).
-    x1, y1, x2, y2 : int  YOLO bounding box coordinates.
+    Uses MediaPipe PoseLandmarker (Task API) when available; falls back to
+    bounding-box aspect ratio for small crops or when the model is unavailable.
 
     Returns
     -------
     (is_fallen: bool, reason: str)
-      reason is one of:
-        "pose:shoulders_below_knees"
-        "pose:hips_below_knees"
-        "pose:standing"
-        "pose:no_landmarks"
-        "pose:small_crop"
-        "ratio:aspect"          ← aspect-ratio fallback
-        "ratio:no_mediapipe"    ← MediaPipe not installed
+      reason tags: pose:shoulders_below_knees | pose:hips_below_knees |
+                   pose:standing | pose:no_landmarks | pose:small_crop |
+                   ratio:no_mediapipe | ratio:aspect | ratio:error
     """
-    pose = _get_pose()
+    lm = _get_landmarker()
 
-    if pose is not None:
+    if lm is not None:
         fh, fw = frame.shape[:2]
-
-        # Pad the crop for better context
-        pad_x = max(8, int((x2 - x1) * CROP_PAD_RATIO))
-        pad_y = max(8, int((y2 - y1) * CROP_PAD_RATIO))
-        cx1 = max(0, x1 - pad_x)
-        cy1 = max(0, y1 - pad_y)
-        cx2 = min(fw, x2 + pad_x)
-        cy2 = min(fh, y2 + pad_y)
+        pad_x  = max(8, int((x2 - x1) * CROP_PAD_RATIO))
+        pad_y  = max(8, int((y2 - y1) * CROP_PAD_RATIO))
+        cx1 = max(0, x1 - pad_x);  cy1 = max(0, y1 - pad_y)
+        cx2 = min(fw, x2 + pad_x); cy2 = min(fh, y2 + pad_y)
 
         crop = frame[cy1:cy2, cx1:cx2]
         ch, cw = crop.shape[:2]
 
         if ch < MIN_CROP_PX or cw < MIN_CROP_PX:
-            # Crop too small — use fallback
             return _aspect_fallen(x1, y1, x2, y2), "pose:small_crop"
 
         try:
             rgb    = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            result = pose.process(rgb)
+            mp_img = _MpImage(image_format=1, data=rgb)   # format 1 = SRGB
+            result = lm.detect(mp_img)
 
             if result.pose_landmarks:
-                lms = result.pose_landmarks.landmark
+                lms = result.pose_landmarks[0]   # first (only) detected person
 
                 shoulder_y = _avg_y(lms, _LEFT_SHOULDER, _RIGHT_SHOULDER)
                 hip_y      = _avg_y(lms, _LEFT_HIP,      _RIGHT_HIP)
                 knee_y     = _avg_y(lms, _LEFT_KNEE,     _RIGHT_KNEE)
 
                 if knee_y is not None:
-                    # Strong signal: upper body (shoulders) below knees
                     if shoulder_y is not None and shoulder_y > knee_y:
-                        return True, "pose:shoulders_below_knees"
-
-                    # Primary signal: hips below knees
+                        return True,  "pose:shoulders_below_knees"
                     if hip_y is not None and hip_y > knee_y:
-                        return True, "pose:hips_below_knees"
-
-                    # Verified standing
+                        return True,  "pose:hips_below_knees"
                     if hip_y is not None:
                         return False, "pose:standing"
 
-            # Landmarks present but knee not visible — use aspect ratio
             return _aspect_fallen(x1, y1, x2, y2), "pose:no_landmarks"
 
         except Exception:
-            pass  # fall through to aspect ratio on any error
+            return _aspect_fallen(x1, y1, x2, y2), "ratio:error"
 
-    # MediaPipe not available
     reason = "ratio:no_mediapipe" if not _mp_available else "ratio:aspect"
     return _aspect_fallen(x1, y1, x2, y2), reason
