@@ -23,12 +23,15 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from routes.cameras import router as cameras_router
 from routes.alerts import router as alerts_router
 from routes.analytics import router as analytics_router
 from routes.reports import router as reports_router
 from routes.health import router as health_router
+from routes.sites import router as sites_router
+from routes.zones import router as zones_router
 
 app = FastAPI(title="PPE Detection API")
 app.add_middleware(
@@ -40,10 +43,16 @@ app.include_router(alerts_router)
 app.include_router(analytics_router)
 app.include_router(reports_router)
 app.include_router(health_router)
+app.include_router(sites_router)
+app.include_router(zones_router)
 
 BASE_PATH = Path(__file__).parent.parent.parent
 CACHE_DIR = BASE_PATH / "artifacts/yolo-service/.cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+SCREENSHOTS_DIR = BASE_PATH / "artifacts/yolo-service/screenshots"
+SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/screenshots", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screenshots")
 
 VIDEO_PATHS: Dict[int, Path] = {
     1: BASE_PATH / "artifacts/ppe-dashboard/public/feeds/cam1-entrance.mp4",
@@ -77,6 +86,54 @@ detection_stats: Dict[int, Any] = {}
 stats_lock = threading.Lock()
 # OpenCV DNN net.setInput / net.forward are NOT thread-safe — serialize with a lock
 inference_lock = threading.Lock()
+
+# Red zone polygons per camera: {camera_id: [{id, name, points:[{x,y},...], color}]}
+camera_zones: Dict[int, list] = {}
+zones_lock   = threading.Lock()
+
+
+def load_camera_zones(camera_id: Optional[int] = None):
+    """Load active red zone definitions from DB into in-memory cache."""
+    import json as _json
+    try:
+        from db import get_cursor
+        with get_cursor() as cur:
+            if camera_id is not None:
+                cur.execute(
+                    "SELECT * FROM red_zones WHERE camera_id=%s AND active=true",
+                    (camera_id,),
+                )
+            else:
+                cur.execute("SELECT * FROM red_zones WHERE active=true")
+            rows = cur.fetchall()
+
+        grouped: Dict[int, list] = {}
+        for row in rows:
+            cid = row["camera_id"]
+            pts = row["points"]
+            if isinstance(pts, str):
+                pts = _json.loads(pts)
+            grouped.setdefault(cid, []).append({
+                "id":    row["id"],
+                "name":  row["name"],
+                "points": pts,
+                "color": row.get("color", "#ff3333"),
+            })
+
+        with zones_lock:
+            if camera_id is not None:
+                camera_zones[camera_id] = grouped.get(camera_id, [])
+            else:
+                camera_zones.clear()
+                camera_zones.update(grouped)
+        total = sum(len(v) for v in camera_zones.values())
+        print(f"[YOLO] Zones loaded: {total} zones across {len(camera_zones)} cameras")
+    except Exception as e:
+        print(f"[YOLO] Zone load error: {e}")
+
+
+def reload_camera_zones(camera_id: int):
+    load_camera_zones(camera_id)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +259,30 @@ HAT_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
     (np.array([0, 100, 100]),   np.array([15, 255, 255])), # red/orange
     (np.array([90, 50, 50]),    np.array([130, 255, 255])),# blue
 ]
+# Work gloves: yellow/lime, orange, blue, red
+GLOVES_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
+    (np.array([15, 60,  60]),  np.array([45, 255, 255])),  # yellow/lime
+    (np.array([5,  100, 80]),  np.array([18, 255, 255])),  # orange
+    (np.array([85, 60,  50]),  np.array([130, 255, 255])), # blue
+    (np.array([0,  100, 80]),  np.array([10, 255, 255])),  # red (low)
+    (np.array([165,100, 80]),  np.array([180, 255, 255])), # red (high)
+]
+# Safety goggles/glasses: yellow or orange tinted lenses, blue lenses
+GOGGLES_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
+    (np.array([15, 50, 100]),  np.array([42, 255, 255])),  # yellow lenses
+    (np.array([5,  80, 100]),  np.array([20, 255, 255])),  # orange lenses
+    (np.array([85, 60,  50]),  np.array([130, 255, 255])), # blue lenses
+]
+# Fire: bright orange-red and yellow-orange flame colors (high saturation + brightness)
+FIRE_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
+    (np.array([0,  150, 170]), np.array([18,  255, 255])), # red-orange flame
+    (np.array([18, 120, 160]), np.array([35,  255, 255])), # yellow-orange flame
+    (np.array([165,150, 170]), np.array([180, 255, 255])), # deep red (hue wraps)
+]
+# Smoke: low-saturation gray/white haze areas
+SMOKE_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
+    (np.array([0, 0,  45]),   np.array([180, 55, 215])),  # gray/white smoke haze
+]
 
 
 def _color_ratio(region: np.ndarray, ranges: List[Tuple]) -> float:
@@ -214,16 +295,105 @@ def _color_ratio(region: np.ndarray, ranges: List[Tuple]) -> float:
     return float(mask.sum()) / (mask.size + 1e-6)
 
 
-def ppe_compliant(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> Tuple[bool, bool]:
-    """Returns (has_vest, has_hat) based on region color analysis."""
-    mid_y   = (y1 + y2) // 2
-    torso   = frame[mid_y:y2, x1:x2]
-    head_y2 = y1 + max(1, (y2 - y1) // 4)
-    head    = frame[y1:head_y2, x1:x2]
+def analyze_ppe(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> Tuple[bool, bool, bool, bool]:
+    """Returns (has_vest, has_hat, has_gloves, has_goggles) via region color analysis."""
+    bh = max(1, y2 - y1)
+    mid_y    = (y1 + y2) // 2
+    head_y2  = y1 + max(1, bh // 4)
+    face_y1  = head_y2
+    face_y2  = y1 + max(1, bh * 2 // 5)
+    lower_y1 = y1 + bh * 3 // 5
 
-    vest = _color_ratio(torso, HIVIS_HSV) > 0.08
-    hat  = _color_ratio(head,  HAT_HSV)  > 0.07
-    return vest, hat
+    torso  = frame[mid_y:y2,      x1:x2]
+    head   = frame[y1:head_y2,    x1:x2]
+    face   = frame[face_y1:face_y2, x1:x2]
+    lower  = frame[lower_y1:y2,   x1:x2]
+
+    vest    = _color_ratio(torso, HIVIS_HSV)   > 0.08
+    hat     = _color_ratio(head,  HAT_HSV)     > 0.07
+    gloves  = _color_ratio(lower, GLOVES_HSV)  > 0.06
+    goggles = _color_ratio(face,  GOGGLES_HSV) > 0.05
+    return vest, hat, gloves, goggles
+
+
+def is_fallen(x1: int, y1: int, x2: int, y2: int) -> bool:
+    """Returns True if bounding-box aspect ratio suggests a fallen person (w > 0.75 * h)."""
+    w = max(1, x2 - x1)
+    h = max(1, y2 - y1)
+    return (w / h) > 0.75
+
+
+def detect_fire_smoke(frame: np.ndarray) -> Tuple[bool, bool, float, float]:
+    """
+    Detect fire and smoke via HSV color analysis on the full frame.
+    Returns (is_fire, is_smoke, fire_ratio, smoke_ratio).
+    Fire:  bright orange/red/yellow pixels in a connected cluster ≥ 1.5% of frame.
+    Smoke: low-saturation gray haze covering ≥ 28% of frame (only when no fire).
+    """
+    h, w = frame.shape[:2]
+    total_px = h * w
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Build fire mask
+    fire_mask = np.zeros(hsv.shape[:2], np.uint8)
+    for lo, hi in FIRE_HSV:
+        fire_mask |= cv2.inRange(hsv, lo, hi)
+
+    # Morphological cleanup — remove noise, keep solid flame blobs
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fire_mask = cv2.morphologyEx(fire_mask, cv2.MORPH_OPEN,   kernel, iterations=2)
+    fire_mask = cv2.morphologyEx(fire_mask, cv2.MORPH_DILATE, kernel, iterations=1)
+
+    fire_ratio = float(cv2.countNonZero(fire_mask)) / (total_px + 1e-6)
+
+    # Require at least one connected blob ≥ 1.5 % of frame (avoids orange-hat false positives)
+    is_fire = False
+    if fire_ratio > 0.02:
+        contours, _ = cv2.findContours(fire_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        max_blob = max((cv2.contourArea(c) for c in contours), default=0)
+        if max_blob > total_px * 0.015:
+            is_fire = True
+
+    # Build smoke mask — only when no fire (smoke ≈ desaturated gray haze)
+    smoke_mask = np.zeros(hsv.shape[:2], np.uint8)
+    for lo, hi in SMOKE_HSV:
+        smoke_mask |= cv2.inRange(hsv, lo, hi)
+    smoke_ratio = float(cv2.countNonZero(smoke_mask)) / (total_px + 1e-6)
+    is_smoke = (smoke_ratio > 0.28) and not is_fire
+
+    return is_fire, is_smoke, fire_ratio, smoke_ratio
+
+
+def draw_fire_smoke_overlay(frame: np.ndarray, is_fire: bool, is_smoke: bool) -> None:
+    """Render a full-frame warning overlay when fire or smoke is detected."""
+    if not is_fire and not is_smoke:
+        return
+    h, w = frame.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    if is_fire:
+        # Layered orange-red border
+        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 40, 220), 14)
+        cv2.rectangle(frame, (5, 5), (w - 6, h - 6), (0, 90, 255), 4)
+        # Semi-transparent alert banner at top
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 54), (0, 15, 180), -1)
+        cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+        label = "!! FIRE DETECTED !!"
+        (tw, _), _ = cv2.getTextSize(label, font, 1.0, 2)
+        cv2.putText(frame, label, (w // 2 - tw // 2, 37),
+                    font, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
+    else:
+        # Gray border for smoke
+        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (140, 140, 155), 10)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 50), (45, 45, 55), -1)
+        cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+        label = "SMOKE DETECTED"
+        (tw, _), _ = cv2.getTextSize(label, font, 0.9, 2)
+        cv2.putText(frame, label, (w // 2 - tw // 2, 34),
+                    font, 0.9, (190, 190, 210), 2, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -254,17 +424,30 @@ def draw_box_with_corners(frame, x1, y1, x2, y2, color, label):
     cv2.putText(frame, label, (x1 + 3, ty - 1), font, fs, txt_c, 1, cv2.LINE_AA)
 
 
-def draw_ppe_tags(frame, x1, y1, x2, y2, vest: bool, hat: bool):
+def draw_ppe_tags(frame, x1, y1, x2, y2,
+                  vest: bool, hat: bool,
+                  gloves: bool = False, goggles: bool = False,
+                  fallen: bool = False, in_zone: bool = False):
     font = cv2.FONT_HERSHEY_SIMPLEX
+    h_frame, w_frame = frame.shape[:2]
     tags = []
-    tags.append(("VEST" if vest else "NO-VEST", C_COMPLY if vest else C_VIOLATE))
-    tags.append(("HARDHAT" if hat else "NO-HAT",   C_COMPLY if hat  else C_VIOLATE))
-    tx, ty = x1, y2 + 14
+    if fallen:
+        tags.append(("FALL!", (0, 30, 255)))
+    if in_zone:
+        tags.append(("IN ZONE", (0, 80, 255)))
+    tags.append(("VEST"    if vest    else "NO-VEST",   C_COMPLY if vest    else C_VIOLATE))
+    tags.append(("HARDHAT" if hat     else "NO-HAT",    C_COMPLY if hat     else C_VIOLATE))
+    tags.append(("GLOVES"  if gloves  else "NO-GLOVE",  C_COMPLY if gloves  else C_VIOLATE))
+    tags.append(("GOGGLES" if goggles else "NO-GOGG",   C_COMPLY if goggles else C_VIOLATE))
+    tx, ty = x1, min(y2 + 14, h_frame - 4)
     for tag, tc in tags:
-        (tw, _), _ = cv2.getTextSize(tag, font, 0.38, 1)
-        cv2.rectangle(frame, (tx, ty - 12), (tx + tw + 4, ty + 2), tc, -1)
-        cv2.putText(frame, tag, (tx + 2, ty), font, 0.38, (0,0,0), 1, cv2.LINE_AA)
-        tx += tw + 8
+        (tw, _), _ = cv2.getTextSize(tag, font, 0.35, 1)
+        if tx + tw + 6 > w_frame:
+            tx = x1
+            ty = min(ty + 16, h_frame - 4)
+        cv2.rectangle(frame, (tx, ty - 11), (tx + tw + 4, ty + 2), tc, -1)
+        cv2.putText(frame, tag, (tx + 2, ty), font, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
+        tx += tw + 6
 
 
 def add_hud(frame: np.ndarray, camera_id: int) -> np.ndarray:
@@ -318,18 +501,25 @@ def draw_status_bar(frame, person_count: int, violation_count: int, compliance: 
 # ---------------------------------------------------------------------------
 
 class PersonDetection:
-    __slots__ = ("x1", "y1", "x2", "y2", "conf", "vest", "hat")
-    def __init__(self, x1, y1, x2, y2, conf, vest, hat):
+    __slots__ = ("x1", "y1", "x2", "y2", "conf", "vest", "hat",
+                 "gloves", "goggles", "fallen", "in_zone")
+    def __init__(self, x1, y1, x2, y2, conf, vest, hat,
+                 gloves=False, goggles=False, fallen=False, in_zone=False):
         self.x1, self.y1, self.x2, self.y2 = x1, y1, x2, y2
-        self.conf = conf
-        self.vest = vest
-        self.hat  = hat
+        self.conf    = conf
+        self.vest    = vest
+        self.hat     = hat
+        self.gloves  = gloves
+        self.goggles = goggles
+        self.fallen  = fallen
+        self.in_zone = in_zone
 
 
 class CameraState:
     def __init__(self, cid: int):
         self.cid = cid
         self.frame: Optional[np.ndarray] = None
+        self.raw_frame: Optional[np.ndarray] = None
         self.detections: List[PersonDetection] = []
         self.last_stats: Dict[str, Any] = {}
         self.lock = threading.Lock()
@@ -338,14 +528,70 @@ class CameraState:
 camera_states: Dict[int, CameraState] = {cid: CameraState(cid) for cid in VIDEO_PATHS}
 
 
+C_ZONE   = (30,  30, 220)   # red (BGR) for danger zones
+C_FALLEN = (0,   30, 255)   # bright red for fallen persons
+C_INZONE = (0,   80, 220)   # red for in-zone persons
+
+
+def draw_zones(frame: np.ndarray, zones: list):
+    """Draw semi-transparent red-zone polygons onto the frame."""
+    if not zones:
+        return
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for zone in zones:
+        pts_norm = zone.get("points", [])
+        if len(pts_norm) < 3:
+            continue
+        try:
+            chex = zone.get("color", "#ff3333").lstrip("#")
+            r, g, b = int(chex[0:2], 16), int(chex[2:4], 16), int(chex[4:6], 16)
+            bgr = (b, g, r)
+        except Exception:
+            bgr = (30, 30, 220)
+
+        pts_px = np.array(
+            [[int(p["x"] * w), int(p["y"] * h)] for p in pts_norm],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(overlay, [pts_px], bgr)
+        cv2.polylines(frame, [pts_px], isClosed=True, color=bgr, thickness=2)
+
+        label = zone.get("name", "ZONE")
+        cx = int(np.mean(pts_px[:, 0]))
+        cy = int(np.mean(pts_px[:, 1]))
+        (tw, th), _ = cv2.getTextSize(label, font, 0.50, 1)
+        cv2.rectangle(frame, (cx - tw // 2 - 3, cy - th - 4), (cx + tw // 2 + 3, cy + 2), bgr, -1)
+        cv2.putText(frame, label, (cx - tw // 2, cy), font, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+
+    cv2.addWeighted(overlay, 0.22, frame, 0.78, 0, frame)
+
+
 def annotate_frame(frame: np.ndarray, dets: List["PersonDetection"],
-                    person_count: int, violation_count: int, comp: float) -> np.ndarray:
-    """Draw all stored detections and status bar onto frame."""
+                   person_count: int, violation_count: int, comp: float,
+                   zones: Optional[list] = None,
+                   is_fire: bool = False, is_smoke: bool = False) -> np.ndarray:
+    """Draw zones, detections, fire/smoke overlay, and status bar onto frame."""
+    if zones:
+        draw_zones(frame, zones)
     for d in dets:
-        compliant = d.vest or d.hat
-        color = C_COMPLY if compliant else C_VIOLATE
-        draw_box_with_corners(frame, d.x1, d.y1, d.x2, d.y2, color, f"PERSON {d.conf:.0%}")
-        draw_ppe_tags(frame, d.x1, d.y1, d.x2, d.y2, d.vest, d.hat)
+        if d.fallen:
+            color = C_FALLEN
+            label = f"FALLEN {d.conf:.0%}"
+        elif d.in_zone:
+            color = C_INZONE
+            label = f"IN ZONE {d.conf:.0%}"
+        elif d.vest or d.hat:
+            color = C_COMPLY
+            label = f"PERSON {d.conf:.0%}"
+        else:
+            color = C_VIOLATE
+            label = f"PERSON {d.conf:.0%}"
+        draw_box_with_corners(frame, d.x1, d.y1, d.x2, d.y2, color, label)
+        draw_ppe_tags(frame, d.x1, d.y1, d.x2, d.y2,
+                      d.vest, d.hat, d.gloves, d.goggles, d.fallen, d.in_zone)
+    draw_fire_smoke_overlay(frame, is_fire, is_smoke)
     draw_status_bar(frame, person_count, violation_count, comp)
     return frame
 
@@ -373,6 +619,11 @@ def run_camera(cid: int):
     last_person_count = 0
     last_violation_count = 0
     last_comp = 100.0
+    last_screenshot_ts = 0.0   # throttle: one screenshot per 30 s per camera
+    # Fire / smoke state (persists across frames)
+    last_fire = False
+    last_smoke = False
+    last_env_ts = 0.0          # throttle: one fire/smoke alert per 60 s per camera
 
     while True:
         ret, frame = cap.read()
@@ -386,21 +637,68 @@ def run_camera(cid: int):
             sc = 960 / w
             frame = cv2.resize(frame, (960, int(h * sc)))
 
+        # Store clean (un-annotated) raw frame for the raw stream endpoint
+        raw = frame.copy()
+
+        # --- Fire / smoke detection every 5 frames (lightweight HSV analysis) ---
+        if idx % 5 == 0:
+            try:
+                is_fire, is_smoke, fire_ratio, smoke_ratio = detect_fire_smoke(frame)
+                last_fire = is_fire
+                last_smoke = is_smoke
+                now_env = time.time()
+                if (is_fire or is_smoke) and (now_env - last_env_ts) > 60:
+                    last_env_ts = now_env
+                    env_type = "fire_detected" if is_fire else "smoke_detected"
+                    _capture_env_alert(cid, raw, env_type)
+            except Exception as e:
+                print(f"[YOLO] cam{cid} fire/smoke error: {e}")
+
         if model_ready and net is not None and idx % detect_every == 0:
             try:
                 persons = detect_persons(frame)
                 new_dets: List[PersonDetection] = []
-                person_count   = 0
+                person_count    = 0
                 violation_count = 0
+                fall_detected   = False
+                zone_intrusion  = False
+
+                h_f, w_f = frame.shape[:2]
+                with zones_lock:
+                    cam_zones = camera_zones.get(cid, [])[:]
 
                 for p in persons:
                     x1, y1, x2, y2, conf = p["x1"], p["y1"], p["x2"], p["y2"], p["conf"]
-                    vest, hat = ppe_compliant(frame, x1, y1, x2, y2)
+                    vest, hat, gloves, goggles = analyze_ppe(frame, x1, y1, x2, y2)
+                    fallen = is_fallen(x1, y1, x2, y2)
+
+                    # Red zone check: use person foot-centre (cx, foot) in normalised coords
+                    cx_n   = ((x1 + x2) / 2.0) / w_f
+                    foot_n = y2 / h_f
+                    in_zone = False
+                    for zone in cam_zones:
+                        pts = zone.get("points", [])
+                        if len(pts) < 3:
+                            continue
+                        pts_arr = np.array([[pt["x"], pt["y"]] for pt in pts], dtype=np.float32)
+                        if cv2.pointPolygonTest(pts_arr, (cx_n, foot_n), False) >= 0:
+                            in_zone = True
+                            break
+
                     compliant = vest or hat
                     person_count += 1
-                    if not compliant:
+                    if not compliant or fallen or in_zone:
                         violation_count += 1
-                    new_dets.append(PersonDetection(x1, y1, x2, y2, conf, vest, hat))
+                    if fallen:
+                        fall_detected = True
+                    if in_zone:
+                        zone_intrusion = True
+
+                    new_dets.append(PersonDetection(
+                        x1, y1, x2, y2, conf, vest, hat,
+                        gloves=gloves, goggles=goggles,
+                        fallen=fallen, in_zone=in_zone,
+                    ))
 
                 comp = round(
                     (person_count - violation_count) / person_count * 100, 1
@@ -416,21 +714,115 @@ def run_camera(cid: int):
                         "personCount": person_count,
                         "violationCount": violation_count,
                         "complianceRate": comp,
+                        "fireDetected": last_fire,
+                        "smokeDetected": last_smoke,
                         "timestamp": time.time(),
                     }
+
+                # --- Violation screenshot capture (throttled to 1 per 30 s) ---
+                now_ts = time.time()
+                if violation_count > 0 and (now_ts - last_screenshot_ts) > 30:
+                    last_screenshot_ts = now_ts
+                    alert_type = (
+                        "fall_detected" if fall_detected
+                        else "red_zone_intrusion" if zone_intrusion
+                        else "missing_ppe"
+                    )
+                    _capture_violation_screenshot(
+                        cid, raw, violation_count, person_count,
+                        alert_type=alert_type,
+                        fall=fall_detected, zone=zone_intrusion,
+                    )
+
             except Exception as e:
                 print(f"[YOLO] cam{cid} error: {e}")
 
         # Always annotate every frame with the latest known detections
-        annotate_frame(frame, last_dets, last_person_count, last_violation_count, last_comp)
+        with zones_lock:
+            frame_zones = camera_zones.get(cid, [])[:]
+        annotate_frame(frame, last_dets, last_person_count, last_violation_count, last_comp,
+                       frame_zones, is_fire=last_fire, is_smoke=last_smoke)
         frame = add_hud(frame, cid)
 
         with state.lock:
             state.frame = frame.copy()
+            state.raw_frame = raw
 
         time.sleep(delay)
 
     cap.release()
+
+
+def _capture_violation_screenshot(cid: int, raw_frame: np.ndarray,
+                                   violation_count: int, person_count: int,
+                                   alert_type: str = "missing_ppe",
+                                   fall: bool = False, zone: bool = False):
+    """Save a JPEG screenshot and insert an alert with the screenshot URL."""
+    try:
+        ts = int(time.time())
+        filename = f"cam{cid}_{ts}.jpg"
+        cv2.imwrite(str(SCREENSHOTS_DIR / filename), raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        screenshot_url = f"/api/screenshots/{filename}"
+
+        severity = "medium"
+        if fall or zone:
+            severity = "critical"
+        elif violation_count >= 3:
+            severity = "critical"
+        elif violation_count >= 2:
+            severity = "high"
+
+        if fall:
+            message = f"Fall detected! Worker down on camera {cid}"
+            missing = ["fall_detected"]
+        elif zone:
+            message = f"Red zone intrusion: {violation_count} person(s) in restricted area on camera {cid}"
+            missing = ["red_zone"]
+        else:
+            message = (
+                f"{violation_count} of {person_count} worker(s) missing PPE "
+                f"detected by camera {cid}"
+            )
+            missing = []
+
+        from db import get_cursor
+        with get_cursor(commit=True) as cur:
+            cur.execute("""
+                INSERT INTO alerts
+                  (camera_id, type, severity, message, missing_ppe, status,
+                   person_count, screenshot_url, created_at)
+                VALUES (%s, %s, %s, %s, %s, 'open', %s, %s, NOW())
+            """, (cid, alert_type, severity, message, missing,
+                  person_count, screenshot_url))
+        print(f"[YOLO] cam{cid} alert ({alert_type}) saved: {filename}")
+    except Exception as e:
+        print(f"[YOLO] Screenshot capture error cam{cid}: {e}")
+
+
+def _capture_env_alert(cid: int, raw_frame: np.ndarray, alert_type: str):
+    """Save a screenshot and insert a fire or smoke alert."""
+    try:
+        ts = int(time.time())
+        filename = f"cam{cid}_env_{ts}.jpg"
+        cv2.imwrite(str(SCREENSHOTS_DIR / filename), raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        screenshot_url = f"/api/screenshots/{filename}"
+
+        if alert_type == "fire_detected":
+            message = f"FIRE detected on camera {cid} — immediate evacuation required"
+        else:
+            message = f"SMOKE detected on camera {cid} — possible fire hazard"
+
+        from db import get_cursor
+        with get_cursor(commit=True) as cur:
+            cur.execute("""
+                INSERT INTO alerts
+                  (camera_id, type, severity, message, missing_ppe, status,
+                   person_count, screenshot_url, created_at)
+                VALUES (%s, %s, 'critical', %s, %s, 'open', 0, %s, NOW())
+            """, (cid, alert_type, message, [], screenshot_url))
+        print(f"[YOLO] cam{cid} env alert ({alert_type}) saved: {filename}")
+    except Exception as e:
+        print(f"[YOLO] Env alert error cam{cid}: {e}")
 
 
 for cid in VIDEO_PATHS:
@@ -465,10 +857,39 @@ def generate_mjpeg(cid: int):
 # Routes
 # ---------------------------------------------------------------------------
 
+def generate_mjpeg_raw(cid: int):
+    """Yield raw (un-annotated) MJPEG frames — no bounding boxes or overlays."""
+    state = camera_states.get(cid)
+    ph = np.zeros((480, 640, 3), np.uint8)
+    cv2.putText(ph, f"CAM-{cid:02d}  RAW FEED", (100, 230),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+
+    while True:
+        frame = ph
+        if state is not None:
+            with state.lock:
+                if state.raw_frame is not None:
+                    frame = state.raw_frame
+                elif state.frame is not None:
+                    frame = state.frame
+
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+        time.sleep(0.04)
+
+
 @app.get("/api/yolo/stream/{camera_id}")
 def stream(camera_id: int):
     return StreamingResponse(
         generate_mjpeg(camera_id),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/api/yolo/stream-raw/{camera_id}")
+def stream_raw(camera_id: int):
+    return StreamingResponse(
+        generate_mjpeg_raw(camera_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -516,6 +937,8 @@ def _run_seed():
         auto_seed_if_empty()
     except Exception as e:
         print(f"[seed] Error: {e}")
+    # Load red zones into cache after seeding
+    load_camera_zones()
 
 
 if __name__ == "__main__":
