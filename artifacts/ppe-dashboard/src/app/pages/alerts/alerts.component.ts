@@ -55,10 +55,16 @@ import { formatDateTime } from '../../lib/utils';
                 @for (alert of alerts(); track alert.id) {
                   <tr class="border-b border-border/50 group hover:bg-white/5">
                     <td class="p-4">
-                      <span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider font-display"
-                        [class]="getSeverityClasses(alert.severity)">
-                        {{ alert.severity | uppercase }}
-                      </span>
+                      <div class="flex flex-col gap-1">
+                        <span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider font-display"
+                          [class]="getSeverityClasses(alert.severity)">
+                          {{ alert.severity | uppercase }}
+                        </span>
+                        <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider"
+                          [class]="getTypeBadgeClass(alert.type)">
+                          {{ getTypeLabel(alert.type) }}
+                        </span>
+                      </div>
                     </td>
                     <td class="p-4 font-mono text-xs whitespace-nowrap text-muted-foreground">{{ formatDateTime(alert.createdAt) }}</td>
                     <td class="p-4 font-display tracking-wider">{{ alert.cameraName }}</td>
@@ -66,6 +72,16 @@ import { formatDateTime } from '../../lib/utils';
                       <span class="text-sm">{{ alert.message }}</span>
                       @if (alert.missingPpe && alert.missingPpe.length > 0) {
                         <div class="text-xs text-destructive mt-1 font-mono">MISSING: {{ alert.missingPpe.join(', ') }}</div>
+                      }
+                      @if (alert.screenshotUrl) {
+                        <button (click)="screenshotModal.set(alert.screenshotUrl)"
+                          class="mt-2 block relative group/thumb">
+                          <img [src]="alert.screenshotUrl" alt="Violation screenshot"
+                            class="h-16 w-28 object-cover rounded border border-destructive/40 hover:border-destructive transition-all" />
+                          <div class="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 transition-opacity rounded flex items-center justify-center">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                          </div>
+                        </button>
                       }
                     </td>
                     <td class="p-4">
@@ -97,6 +113,29 @@ import { formatDateTime } from '../../lib/utils';
         </div>
       </div>
     </div>
+
+    @if (screenshotModal()) {
+      <div class="fixed inset-0 z-50 flex items-center justify-center p-4"
+        (click)="screenshotModal.set(null)">
+        <div class="absolute inset-0 bg-black/80 backdrop-blur-sm"></div>
+        <div class="relative z-10 max-w-3xl w-full rounded-xl border border-destructive/40 bg-card overflow-hidden shadow-[0_0_60px_rgba(255,0,0,0.2)]"
+          (click)="$event.stopPropagation()">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-border/50 bg-background/80">
+            <div class="flex items-center gap-2 text-sm font-display tracking-wider">
+              <div class="w-2 h-2 rounded-full bg-destructive animate-pulse shadow-[0_0_8px_rgba(255,0,0,0.8)]"></div>
+              <span class="text-destructive">VIOLATION SCREENSHOT</span>
+            </div>
+            <button (click)="screenshotModal.set(null)"
+              class="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </div>
+          <div class="p-2 bg-black">
+            <img [src]="screenshotModal()!" alt="Violation screenshot" class="w-full rounded object-contain max-h-[70vh]" />
+          </div>
+        </div>
+      </div>
+    }
   `
 })
 export class AlertsComponent implements OnInit {
@@ -106,6 +145,7 @@ export class AlertsComponent implements OnInit {
   statusFilter = signal<AlertStatus | undefined>(undefined);
   alerts = signal<Alert[]>([]);
   isLoading = signal(true);
+  screenshotModal = signal<string | null>(null);
 
   formatDateTime = formatDateTime;
 
@@ -154,6 +194,30 @@ export class AlertsComponent implements OnInit {
       },
       error: () => this.toastService.show('Failed to resolve alert', 'error')
     });
+  }
+
+  getTypeLabel(type: string): string {
+    const labels: Record<string, string> = {
+      fall_detected:      'FALL',
+      red_zone_intrusion: 'ZONE',
+      missing_ppe:        'PPE',
+      fire_detected:      'FIRE',
+      smoke_detected:     'SMOKE',
+      camera_offline:     'OFFLINE',
+      low_compliance:     'COMPLIANCE',
+    };
+    return labels[type] ?? type.toUpperCase().replace(/_/g, ' ');
+  }
+
+  getTypeBadgeClass(type: string): string {
+    switch (type) {
+      case 'fire_detected':      return 'border-red-500/80 bg-red-500/20 text-red-400 animate-pulse';
+      case 'smoke_detected':     return 'border-slate-400/60 bg-slate-500/15 text-slate-300';
+      case 'fall_detected':      return 'border-red-500/60 bg-red-500/15 text-red-400';
+      case 'red_zone_intrusion': return 'border-orange-500/60 bg-orange-500/15 text-orange-400';
+      case 'missing_ppe':        return 'border-yellow-500/40 bg-yellow-500/10 text-yellow-400';
+      default:                   return 'border-border/50 bg-white/5 text-muted-foreground';
+    }
   }
 
   getSeverityClasses(severity: AlertSeverity): string {
