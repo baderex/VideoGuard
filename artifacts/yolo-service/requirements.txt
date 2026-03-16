@@ -6,3 +6,6 @@ psycopg2-binary
 python-jose[cryptography]
 bcrypt
 mediapipe
+# ultralytics is optional — needed only when PPE_DETECTION_MODE=yolov8
+# It is installed automatically by index.ts when detected in this file.
+ultralytics
