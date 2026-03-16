@@ -37,6 +37,7 @@ from routes.users import router as users_router
 from routes.init import router as init_router
 from auth_utils import decode_token
 from fall_detection import is_fallen_pose
+from ppe_detection import analyze_ppe, run_ppe_detection, get_mode_info
 
 _ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 
@@ -304,34 +305,10 @@ def detect_persons(frame: np.ndarray, input_size: int = 416) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# Color-based PPE compliance
+# Color-based PPE compliance — now handled by ppe_detection.py
+# analyze_ppe() and run_ppe_detection() imported at the top of this file.
+# Set PPE_DETECTION_MODE=yolov8 to use the YOLOv8 PPE model instead of HSV.
 # ---------------------------------------------------------------------------
-
-HIVIS_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
-    (np.array([18, 80, 80]),  np.array([42, 255, 255])),   # yellow
-    (np.array([5, 100, 100]), np.array([18, 255, 255])),   # orange
-    (np.array([38, 50, 50]),  np.array([80, 255, 200])),   # lime/green
-]
-HAT_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
-    (np.array([0,   0, 180]),   np.array([180, 40, 255])), # white
-    (np.array([18, 80, 100]),   np.array([40, 255, 255])), # yellow
-    (np.array([0, 100, 100]),   np.array([15, 255, 255])), # red/orange
-    (np.array([90, 50, 50]),    np.array([130, 255, 255])),# blue
-]
-# Work gloves: yellow/lime, orange, blue, red
-GLOVES_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
-    (np.array([15, 60,  60]),  np.array([45, 255, 255])),  # yellow/lime
-    (np.array([5,  100, 80]),  np.array([18, 255, 255])),  # orange
-    (np.array([85, 60,  50]),  np.array([130, 255, 255])), # blue
-    (np.array([0,  100, 80]),  np.array([10, 255, 255])),  # red (low)
-    (np.array([165,100, 80]),  np.array([180, 255, 255])), # red (high)
-]
-# Safety goggles/glasses: yellow or orange tinted lenses, blue lenses
-GOGGLES_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
-    (np.array([15, 50, 100]),  np.array([42, 255, 255])),  # yellow lenses
-    (np.array([5,  80, 100]),  np.array([20, 255, 255])),  # orange lenses
-    (np.array([85, 60,  50]),  np.array([130, 255, 255])), # blue lenses
-]
 # Fire: bright orange-red and yellow-orange flame colors (high saturation + brightness)
 FIRE_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
     (np.array([0,  150, 170]), np.array([18,  255, 255])), # red-orange flame
@@ -344,35 +321,8 @@ SMOKE_HSV: List[Tuple[np.ndarray, np.ndarray]] = [
 ]
 
 
-def _color_ratio(region: np.ndarray, ranges: List[Tuple]) -> float:
-    if region.size == 0:
-        return 0.0
-    hsv  = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], np.uint8)
-    for lo, hi in ranges:
-        mask |= cv2.inRange(hsv, lo, hi)
-    return float(mask.sum()) / (mask.size + 1e-6)
-
-
-def analyze_ppe(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> Tuple[bool, bool, bool, bool]:
-    """Returns (has_vest, has_hat, has_gloves, has_goggles) via region color analysis."""
-    bh = max(1, y2 - y1)
-    mid_y    = (y1 + y2) // 2
-    head_y2  = y1 + max(1, bh // 4)
-    face_y1  = head_y2
-    face_y2  = y1 + max(1, bh * 2 // 5)
-    lower_y1 = y1 + bh * 3 // 5
-
-    torso  = frame[mid_y:y2,      x1:x2]
-    head   = frame[y1:head_y2,    x1:x2]
-    face   = frame[face_y1:face_y2, x1:x2]
-    lower  = frame[lower_y1:y2,   x1:x2]
-
-    vest    = _color_ratio(torso, HIVIS_HSV)   > 0.08
-    hat     = _color_ratio(head,  HAT_HSV)     > 0.07
-    gloves  = _color_ratio(lower, GLOVES_HSV)  > 0.06
-    goggles = _color_ratio(face,  GOGGLES_HSV) > 0.05
-    return vest, hat, gloves, goggles
+# _color_ratio and analyze_ppe removed — now live in ppe_detection.py
+# analyze_ppe is imported from ppe_detection at the top of this file.
 
 
 # is_fallen() replaced by is_fallen_pose() from fall_detection.py
@@ -723,9 +673,12 @@ def run_camera(cid: int):
                 with zones_lock:
                     cam_zones = camera_zones.get(cid, [])[:]
 
+                # Run PPE model on the full frame once (no-op in HSV mode)
+                ppe_frame_dets = run_ppe_detection(frame)
+
                 for p in persons:
                     x1, y1, x2, y2, conf = p["x1"], p["y1"], p["x2"], p["y2"], p["conf"]
-                    vest, hat, gloves, goggles = analyze_ppe(frame, x1, y1, x2, y2)
+                    vest, hat, gloves, goggles = analyze_ppe(frame, x1, y1, x2, y2, ppe_frame_dets)
                     fallen, _fall_reason = is_fallen_pose(frame, x1, y1, x2, y2)
 
                     # Red zone check: use person foot-centre (cx, foot) in normalised coords
@@ -948,6 +901,12 @@ def stream_raw(camera_id: int):
         generate_mjpeg_raw(camera_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/api/ppe/mode")
+def ppe_mode():
+    """Return the active PPE detection mode and model information."""
+    return JSONResponse(get_mode_info())
 
 
 @app.get("/api/yolo/stats/{camera_id}")
