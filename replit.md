@@ -63,16 +63,45 @@ Thin Node.js launcher that spawns the unified Python FastAPI service (`artifacts
 
 Unified FastAPI backend serving all REST API routes and YOLO detection:
 
-- `main.py` — FastAPI app with YOLO detection routes and MJPEG streaming
+- `main.py` — FastAPI app with YOLO detection routes, MJPEG streaming, **auth middleware**
 - `db.py` — PostgreSQL connection helper using psycopg2
+- `auth_utils.py` — JWT (HS256/python-jose), bcrypt password hashing, FastAPI deps (`get_current_user`, `require_admin`, `site_filter_from_request`)
 - `simulation.py` — simulated PPE detection snapshot logic
-- `seed.py` — database seeder (runs on startup if tables empty)
-- `routes/cameras.py` — camera CRUD endpoints
-- `routes/alerts.py` — alert list/acknowledge/resolve endpoints
+- `seed.py` — database seeder (runs on startup); includes `_ensure_users()` for 5 default accounts
+- `routes/cameras.py` — camera CRUD endpoints (returns `siteId`)
+- `routes/alerts.py` — alert list/acknowledge/resolve endpoints (returns `screenshotUrl`)
 - `routes/analytics.py` — live analytics, history, compliance summary
 - `routes/reports.py` — daily compliance reports
 - `routes/health.py` — health check endpoint
-- All routes prefixed with `/api/` (e.g., `/api/cameras`, `/api/yolo/stream/{id}`)
+- `routes/sites.py` — site CRUD + cameras-per-site endpoints
+- `routes/auth.py` — `POST /api/auth/login`, `GET /api/auth/me`
+- `routes/users.py` — admin-only user CRUD (`GET/POST/PUT/DELETE /api/users`)
+- `screenshots/` — violation JPEG snapshots served at `/api/screenshots/{filename}`
+- All routes prefixed with `/api/` (e.g., `/api/cameras`, `/api/yolo/stream/{id}`, `/api/yolo/stream-raw/{id}`)
+- YOLO loop auto-captures violation screenshots (1 per 30s per camera) and inserts alerts with `screenshot_url`
+- DB schema: `sites`, `cameras`, `alerts`, `analytics`, `red_zones`, `users` tables
+
+**Auth middleware** (in `main.py`): all `/api/*` routes require `Authorization: Bearer <token>` except:
+- `/api/auth/*` (login endpoint)
+- `/api/yolo/stream*` / `/api/yolo/stream-raw*` (MJPEG — browsers can't send headers on `<img>` src)
+- `/api/screenshots/*` (static violation images)
+- `/api/health*` (health checks)
+
+**Roles**: `admin` (full access + user management), `support` (view all, manage alerts), `site_viewer` (own site only)
+
+**Default accounts**: admin/admin123, support/support123, site1/site123 → site2/site123 → site3/site123
+
+### `artifacts/ppe-dashboard` (Angular 21)
+
+Angular standalone-component dashboard with dark industrial design:
+
+- `src/app/services/auth.service.ts` — Auth state using Angular signals; login/logout/me; token stored in localStorage
+- `src/app/interceptors/auth.interceptor.ts` — Functional HTTP interceptor; adds Bearer token; auto-logout on 401
+- `src/app/guards/auth.guard.ts` — `canActivate`: checks `isAuthenticated()`, redirects to `/login`
+- `src/app/guards/admin.guard.ts` — `canActivate`: checks `isAdmin()`, redirects to `/`
+- `src/app/pages/login/login.component.ts` — Dark industrial login page with demo account quick-fill
+- `src/app/pages/admin/user-management.component.ts` — Admin panel: user table + create/edit/delete modals
+- `src/app/layout/sidebar.component.ts` — Shows username/role badge, logout button, admin-only "Users" nav item
 
 ### `lib/db` (`@workspace/db`)
 

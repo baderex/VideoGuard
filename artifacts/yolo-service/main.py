@@ -32,12 +32,49 @@ from routes.reports import router as reports_router
 from routes.health import router as health_router
 from routes.sites import router as sites_router
 from routes.zones import router as zones_router
+from routes.auth import router as auth_router
+from routes.users import router as users_router
+from auth_utils import decode_token
 
 app = FastAPI(title="PPE Detection API")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+# Auth middleware — sets request.state.user for protected routes
+# Public paths: /api/auth/*, /api/yolo/stream*, /api/screenshots/*
+_PUBLIC_PREFIXES = (
+    "/api/auth/",
+    "/api/yolo/stream",
+    "/api/yolo/stream-raw",
+    "/api/screenshots/",
+    "/api/health",
+    "/api/yolo/status",
+    "/api/yolo/health",
+)
+
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    path = request.url.path
+    if any(path.startswith(p) for p in _PUBLIC_PREFIXES) or path in ("/api/health", "/"):
+        return await call_next(request)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            payload = decode_token(auth_header.split(" ", 1)[1])
+            request.state.user = {
+                "id": int(payload["sub"]),
+                "role": payload.get("role", "support"),
+                "site_id": payload.get("site_id"),
+            }
+        except Exception:
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+    else:
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    return await call_next(request)
+
+app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(cameras_router)
 app.include_router(alerts_router)
 app.include_router(analytics_router)

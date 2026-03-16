@@ -34,6 +34,18 @@ def _ensure_schema():
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            SERIAL PRIMARY KEY,
+                username      TEXT NOT NULL UNIQUE,
+                email         TEXT,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'support',
+                site_id       INTEGER REFERENCES sites(id),
+                active        BOOLEAN NOT NULL DEFAULT true,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         conn.commit()
         cur.close()
     except Exception as e:
@@ -41,6 +53,48 @@ def _ensure_schema():
         print(f"[seed] Schema migration error (non-fatal): {e}")
     finally:
         conn.close()
+
+
+def _ensure_users():
+    """Seed default user accounts if none exist."""
+    try:
+        import bcrypt as _bcrypt
+
+        def _hash(pw: str) -> str:
+            return _bcrypt.hashpw(pw.encode(), _bcrypt.gensalt()).decode()
+
+        with get_cursor() as cur:
+            cur.execute("SELECT count(*)::int AS cnt FROM users")
+            if cur.fetchone()["cnt"] > 0:
+                return
+
+        with get_cursor() as cur:
+            cur.execute("SELECT id FROM sites ORDER BY id LIMIT 3")
+            site_ids = [r["id"] for r in cur.fetchall()]
+
+        accounts = [
+            ("admin",   "admin@videoguard.io",   _hash("admin123"),    "admin",       None),
+            ("support", "support@videoguard.io",  _hash("support123"),  "support",     None),
+        ]
+        for i, sid in enumerate(site_ids):
+            accounts.append((
+                f"site{i+1}",
+                f"site{i+1}@videoguard.io",
+                _hash("site123"),
+                "site_viewer",
+                sid,
+            ))
+
+        with get_cursor(commit=True) as cur:
+            for username, email, pw_hash, role, site_id in accounts:
+                cur.execute(
+                    """INSERT INTO users (username, email, password_hash, role, site_id)
+                       VALUES (%s, %s, %s, %s, %s) ON CONFLICT (username) DO NOTHING""",
+                    (username, email, pw_hash, role, site_id),
+                )
+        print(f"[seed] Seeded {len(accounts)} user accounts.")
+    except Exception as e:
+        print(f"[seed] User seeding error (non-fatal): {e}")
 
 
 def auto_seed_if_empty():
@@ -52,6 +106,7 @@ def auto_seed_if_empty():
         if row and row["cnt"] > 0:
             _ensure_sites()
             _ensure_red_zones()
+            _ensure_users()
             return
 
     print("[seed] No cameras found — seeding initial data...")
@@ -127,6 +182,7 @@ def auto_seed_if_empty():
         )
 
     print(f"[seed] Done — seeded 3 sites, {len(cameras)} cameras, 5 alerts, {len(zone_data)} red zones.")
+    _ensure_users()
 
 
 def _ensure_red_zones():
