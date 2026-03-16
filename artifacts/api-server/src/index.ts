@@ -68,11 +68,14 @@ if (existsSync(requirementsFile)) {
     execSync(`"${python}" -m pip install -q -r "${requirementsFile}"`, {
       stdio: "inherit",
     });
-    // mediapipe pulls in opencv-contrib-python (requires libGL) which breaks
-    // headless server environments. Evict it, then force-reinstall headless cv2.
-    try {
-      execSync(`"${python}" -m pip uninstall -y opencv-contrib-python`, { stdio: "pipe" });
-    } catch { /* already absent — ignore */ }
+    // mediapipe + ultralytics may pull in opencv-contrib-python or opencv-python
+    // (both require libGL which is absent in headless server environments).
+    // Evict any GUI-linked opencv variants, then force-reinstall the headless build.
+    for (const pkg of ["opencv-contrib-python", "opencv-python"]) {
+      try {
+        execSync(`"${python}" -m pip uninstall -y ${pkg}`, { stdio: "pipe" });
+      } catch { /* already absent — ignore */ }
+    }
     execSync(`"${python}" -m pip install -q --force-reinstall opencv-python-headless`, {
       stdio: "inherit",
     });
